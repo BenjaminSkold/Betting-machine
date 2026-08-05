@@ -32,9 +32,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           }}
         />
       </head>
-      <body className="min-h-full flex bg-[var(--page-plane)]">
+      <body className="min-h-full flex flex-col md:flex-row bg-[var(--page-plane)]">
         <Sidebar />
-        <main className="flex-1 min-w-0 px-8 py-8">{children}</main>
+        <main className="flex-1 min-w-0 px-4 py-6 md:px-8 md:py-8">{children}</main>
       </body>
     </html>
   );

@@ -79,12 +79,12 @@ function ScoreCard({
   const legLabel: Record<Leg, string> = { home: homeTeam, draw: "Draw", away: awayTeam };
   return (
     <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-1)] p-4">
-      <div className="mb-3 flex items-baseline justify-between">
+      <div className="mb-3 flex flex-wrap items-baseline justify-between gap-1">
         <div className="text-sm font-medium text-[var(--text-primary)]">{score.minutesBeforeKickoff} min before kickoff</div>
         <div className="text-xs text-[var(--text-muted)]">frozen {new Date(score.frozenAt).toLocaleString()}</div>
       </div>
 
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         {(["home", "draw", "away"] as Leg[]).map((leg) => {
           const b = score.breakdown[leg];
           const tracked = leg === score.trackedLeg;

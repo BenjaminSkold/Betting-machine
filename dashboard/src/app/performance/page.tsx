@@ -36,7 +36,7 @@ export default async function PerformancePage() {
         </div>
       )}
 
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         <StatTile label="Fake bankroll" value={`$${bankroll.toFixed(2)}`} delta={settled.length > 0 ? `${settled.length} settled` : undefined} deltaGood={bankroll >= 0} />
         <StatTile label="Win rate" value={winRate !== null ? `${(winRate * 100).toFixed(1)}%` : "—"} />
         <StatTile label="ROI" value={roi !== null ? `${(roi * 100).toFixed(1)}%` : "—"} deltaGood={roi !== null ? roi >= 0 : undefined} delta={roi !== null ? (roi >= 0 ? "profitable" : "down") : undefined} />

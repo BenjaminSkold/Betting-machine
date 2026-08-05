@@ -21,7 +21,7 @@ export default async function OverviewPage() {
 
   return (
     <div className="max-w-5xl">
-      <div className="mb-6 flex items-baseline justify-between">
+      <div className="mb-6 flex flex-wrap items-baseline justify-between gap-2">
         <div>
           <h1 className="text-2xl font-semibold text-[var(--text-primary)]">Overview</h1>
           <p className="text-sm text-[var(--text-secondary)]">Where&apos;s the edge, right now.</p>
@@ -35,7 +35,7 @@ export default async function OverviewPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         <StatTile label="Upcoming matches" value={String(upcoming)} />
         <StatTile label="Resolved matches" value={String(resolved)} />
         <StatTile label="Watchlisted wallets" value={`${watchlisted} / ${wallets.length}`} />
@@ -47,7 +47,7 @@ export default async function OverviewPage() {
         />
       </div>
 
-      <div className="mt-8 grid grid-cols-3 gap-4">
+      <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
         <QuickLink href="/matches" title="Matches" description="Upcoming and recent matches with confluence score + edge." />
         <QuickLink href="/wallets" title="Wallets" description="The tier-“watch” leaderboard, sliced by competition and team." />
         <QuickLink href="/trades" title="Trades" description="Every Tier 1 trade log, searchable by wallet." />
@@ -64,15 +64,15 @@ export default async function OverviewPage() {
             <Link
               key={m.id}
               href={`/matches/${m.id}`}
-              className="flex items-center justify-between rounded-lg border border-[var(--border)] bg-[var(--surface-1)] px-4 py-3 hover:border-[var(--baseline)]"
+              className="flex items-center justify-between gap-3 rounded-lg border border-[var(--border)] bg-[var(--surface-1)] px-4 py-3 hover:border-[var(--baseline)]"
             >
-              <div>
+              <div className="min-w-0">
                 <div className="text-xs font-medium text-[var(--text-muted)]">{m.data.competition}</div>
                 <div className="font-medium text-[var(--text-primary)]">
                   {m.data.homeTeam} vs. {m.data.awayTeam}
                 </div>
               </div>
-              <div className="text-sm text-[var(--text-secondary)]">{m.data.result ?? "—"}</div>
+              <div className="shrink-0 text-sm text-[var(--text-secondary)]">{m.data.result ?? "—"}</div>
             </Link>
           ))}
         </div>

@@ -30,7 +30,7 @@ export default async function WalletDetailPage({ params }: { params: Promise<{ a
       </Link>
 
       <div className="mt-2 mb-6">
-        <h1 className="font-mono text-xl font-semibold text-[var(--text-primary)]">{address}</h1>
+        <h1 className="break-all font-mono text-xl font-semibold text-[var(--text-primary)]">{address}</h1>
         <div className="mt-1 flex items-center gap-2 text-sm text-[var(--text-secondary)]">
           <span
             className="rounded-full px-2 py-0.5 text-xs font-medium"
@@ -42,7 +42,7 @@ export default async function WalletDetailPage({ params }: { params: Promise<{ a
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
         <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-1)] px-5 py-4">
           <div className="text-sm text-[var(--text-secondary)]">Resolved trades</div>
           <div className="mt-1 text-3xl font-semibold text-[var(--text-primary)]">{wallet.data.totalResolvedTrades}</div>
