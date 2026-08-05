@@ -126,7 +126,7 @@ Goal: prove the data pipeline works before anything depends on it. No scoring, n
 Goal: the pipeline described in "Data model" and "Tech stack" actually running on a schedule, writing real data.
 
 > **Prompt:**
-> Read PROJECT.md for context, including the findings from Milestone 1 (check NOTES.md if it exists). Set up a Firebase project (Firestore, free Spark plan) and the collections described in the Data model section. Write a script that pulls current Polymarket data for EPL/UCL/UEL matches (fixtures, price snapshots, and Tier 1 trade logs — see "Wallet tracking logic") and writes it into Firestore using the Firebase Admin SDK. Then wire this script up to run on a schedule via a GitHub Action (not Firebase Cloud Functions — we're avoiding that specifically to not need a billing account). Confirm it runs successfully at least twice on its schedule before considering this done.
+> Read PROJECT.md for context, including the findings from Milestone 1 (check NOTES.md if it exists). Set up a Firebase project (Firestore, free Spark plan) and the collections described in the Data model section. Write a script that pulls current Polymarket data for EPL/UCL/UEL matches (fixtures, price snapshots, and Tier 1 trade logs — see "Wallet tracking logic") and writes it into Firestore using the Firebase Admin SDK. Then wire this script up to run on a schedule via a GitHub Action (not Firebase Cloud Functions — we're avoiding that specifically to not need a billing account). As part of this same milestone, have the job write a `lastSuccessfulRun` timestamp to Firestore on every successful run (see "Keep it running, not just built") — this isn't optional polish, build it in now. Confirm it runs successfully at least twice on its schedule before considering this done.
 
 ---
 
@@ -165,6 +165,14 @@ Goal: a real webpage, but only after everything above is solid. Do not start thi
 > Read PROJECT.md for full context. Build a Vercel-hosted web app (framework your choice, but something that supports a clean, modern, responsive design working well on both desktop and phone — this matters to the user) that reads from Firestore and shows: a list of upcoming/recent matches with their current confluence score and edge; a per-match detail view with the full score breakdown and price history chart; a wallet leaderboard (tier: "watch" wallets, with aggregate and sliced stats); and a clearly separate "my performance" section showing the paper-bet ledger's running bankroll, win rate, and ROI — kept visually and structurally apart from the wallet leaderboard. Keep the visual design clean and modern but don't over-invest in styling choices yet — the user plans to provide specific design inspiration (sites/URLs) before a final visual pass.
 
 ---
+
+## When you're allowed to trust the results
+
+Don't draw conclusions — good or bad — from a small stretch of paper bets. Football is low-scoring and high-variance enough that a genuinely good approach can look bad over a few weeks by chance, and a genuinely bad one can look good. Agree on this now, before results start coming in, so the bar doesn't quietly move once real numbers exist: treat roughly **150-200 settled paper bets, or one full season, whichever comes later,** as the minimum before treating any win rate, ROI, or edge-by-segment finding as real rather than noise. Below that threshold, the dashboard should say so plainly (e.g. "N=32, too early to tell") rather than presenting a confident-looking number. This is also the bar that would eventually matter for any future real-money conversation — not that this build is working toward that, but if the question ever comes up, this is the honest minimum, not a vibe.
+
+## Keep it running, not just built
+
+Scheduled jobs like the ones in Milestones 2 and 3 fail quietly far more often than they fail loudly — an expired API response shape, a renamed field, a GitHub Action that silently stops triggering. Add a basic freshness check from the start: something as simple as a `lastSuccessfulRun` timestamp written to Firestore on every successful job run, and a way to notice if it hasn't updated in longer than expected (even just glancing at it on the dashboard counts, once Milestone 6 exists). Treat this as part of Milestone 2, not a nice-to-have added later — unmaintained cron jobs quietly going stale is one of the most common ways a project like this dies without anyone noticing until months of data are missing.
 
 ## Open questions to keep in mind, not blockers
 
