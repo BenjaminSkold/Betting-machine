@@ -1,7 +1,8 @@
 import Link from "next/link";
 import { getMatches, getSystemStatus } from "@/lib/data";
-import type { ConfluenceScore } from "@/lib/types";
+import type { Competition, ConfluenceScore } from "@/lib/types";
 import { listCollection } from "@/lib/firestore";
+import { freshnessAge } from "@/lib/time";
 
 function formatKickoff(iso: string): string {
   const d = new Date(iso);
@@ -13,12 +14,22 @@ function pct(x: number | null | undefined): string {
   return `${(x * 100).toFixed(1)}%`;
 }
 
-export default async function MatchesPage() {
-  const [matches, scores, status] = await Promise.all([
+const COMPETITIONS: Competition[] = ["EPL", "UCL", "UEL", "UECL"];
+
+export default async function MatchesPage({ searchParams }: { searchParams: Promise<{ competition?: string; q?: string }> }) {
+  const params = await searchParams;
+  const [allMatches, scores, status] = await Promise.all([
     getMatches(),
     listCollection<ConfluenceScore>("confluenceScores"),
     getSystemStatus(),
   ]);
+
+  const q = params.q?.toLowerCase().trim();
+  const matches = allMatches.filter((m) => {
+    if (params.competition && m.data.competition !== params.competition) return false;
+    if (q && !`${m.data.homeTeam} ${m.data.awayTeam}`.toLowerCase().includes(q)) return false;
+    return true;
+  });
 
   const scoresByMatch = new Map<string, ConfluenceScore[]>();
   for (const s of scores) {
@@ -38,12 +49,7 @@ export default async function MatchesPage() {
     .sort((a, b) => b.data.kickoffTime.localeCompare(a.data.kickoffTime))
     .slice(0, 30);
 
-  // This is a Server Component: it runs once per request with no re-render
-  // to stay consistent across, so "now" is meant to be wall-clock-fresh on
-  // every load — the purity rule targets client re-render stability, which
-  // doesn't apply here.
-  // eslint-disable-next-line react-hooks/purity
-  const isStale = status?.lastSuccessfulRun ? Date.now() - new Date(status.lastSuccessfulRun).getTime() > 30 * 60 * 1000 : true;
+  const isStale = status?.lastSuccessfulRun ? freshnessAge(status.lastSuccessfulRun) > 30 * 60 * 1000 : true;
 
   return (
     <div className="max-w-4xl">
@@ -57,6 +63,31 @@ export default async function MatchesPage() {
           {status?.lastSuccessfulRun ? `Last collected ${new Date(status.lastSuccessfulRun).toLocaleString()}` : "No collection run yet"}
         </div>
       </div>
+
+      <form className="mb-6 flex flex-wrap gap-3 rounded-lg border border-[var(--border)] bg-[var(--surface-1)] p-3">
+        <input
+          type="text"
+          name="q"
+          defaultValue={params.q}
+          placeholder="Search team name"
+          className="flex-1 min-w-[220px] rounded-md border border-[var(--border)] bg-[var(--page-plane)] px-3 py-1.5 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)]"
+        />
+        <select
+          name="competition"
+          defaultValue={params.competition ?? ""}
+          className="rounded-md border border-[var(--border)] bg-[var(--page-plane)] px-3 py-1.5 text-sm text-[var(--text-primary)]"
+        >
+          <option value="">All competitions</option>
+          {COMPETITIONS.map((c) => (
+            <option key={c} value={c}>
+              {c}
+            </option>
+          ))}
+        </select>
+        <button type="submit" className="rounded-md px-4 py-1.5 text-sm font-medium" style={{ background: "var(--diverging-pos)", color: "white" }}>
+          Filter
+        </button>
+      </form>
 
       <Section title="Upcoming" matches={upcoming} latestScoreFor={latestScoreFor} emptyText="No upcoming matches tracked yet." />
       <Section title="Recent" matches={recent} latestScoreFor={latestScoreFor} emptyText="No resolved matches yet." />

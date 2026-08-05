@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { getWallets } from "@/lib/data";
 
 function pct(x: number | null | undefined): string {
@@ -40,7 +41,11 @@ export default async function WalletsPage() {
                 const bestComp = Object.entries(w.data.bySlice.byCompetition).sort((a, b) => (b[1].winRate ?? 0) - (a[1].winRate ?? 0))[0];
                 return (
                   <tr key={w.id} className="border-b border-[var(--border)] last:border-0">
-                    <td className="px-4 py-2.5 font-mono text-xs text-[var(--text-secondary)]">{w.id.slice(0, 12)}…</td>
+                    <td className="px-4 py-2.5 font-mono text-xs">
+                      <Link href={`/wallets/${w.id}`} className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:underline">
+                        {w.id.slice(0, 12)}…
+                      </Link>
+                    </td>
                     <td className="tabular px-4 py-2.5 text-right text-[var(--text-primary)]">{w.data.totalResolvedTrades}</td>
                     <td className="tabular px-4 py-2.5 text-right font-medium text-[var(--text-primary)]">{pct(w.data.aggregateWinRate)}</td>
                     <td className="tabular px-4 py-2.5 text-right text-[var(--text-primary)]">{pct(w.data.aggregateROI)}</td>

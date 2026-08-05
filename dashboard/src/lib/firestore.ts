@@ -66,13 +66,17 @@ function decodeFields(fields: Record<string, FirestoreValue>): Record<string, un
 
 const BASE = "https://firestore.googleapis.com/v1";
 
-async function request(url: string): Promise<{ status: number; body: unknown }> {
+async function request(url: string, init?: RequestInit): Promise<{ status: number; body: unknown }> {
   const token = await getToken();
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
+  const res = await fetch(url, {
+    ...init,
+    headers: { Authorization: `Bearer ${token}`, ...(init?.headers || {}) },
+    cache: "no-store",
+  });
   if (res.status === 404) return { status: 404, body: null };
   const text = await res.text();
   const parsed = text ? JSON.parse(text) : null;
-  if (!res.ok) throw new Error(`Firestore REST GET ${url} -> ${res.status}: ${text.slice(0, 500)}`);
+  if (!res.ok) throw new Error(`Firestore REST ${init?.method ?? "GET"} ${url} -> ${res.status}: ${text.slice(0, 500)}`);
   return { status: res.status, body: parsed };
 }
 
@@ -82,7 +86,7 @@ function projectId(): string {
   return cachedProjectId;
 }
 
-export type Doc<T> = { id: string; data: T };
+export type Doc<T> = { id: string; data: T; parentId?: string };
 
 export async function getDoc<T = Record<string, unknown>>(path: string): Promise<Doc<T> | null> {
   const url = `${BASE}/projects/${projectId()}/databases/(default)/documents/${path}`;
@@ -108,5 +112,50 @@ export async function listCollection<T = Record<string, unknown>>(path: string):
     }
     pageToken = page.nextPageToken;
   } while (pageToken);
+  return docs;
+}
+
+// Fetches every document across every "{collectionId}" subcollection in the
+// database in a bounded number of requests, instead of one request per
+// parent — the fix for a real bug: N separate listCollection calls (one per
+// match) queue behind Node's per-host connection limit and get slower as N
+// grows (60 matches measured at ~24s total, even though each individual
+// call is issued in parallel — Node's default per-host connection limit is
+// well under 60). One collection-group query, paginated via a __name__
+// cursor, replaces all of them; runQuery itself runs ~5s regardless of
+// result size (collection-group queries have real Firestore-side cost this
+// project hasn't amortized yet, separate from the connection-limit bug) —
+// still a large net win over 24s, and it's one bounded cost instead of one
+// that scales with match count.
+export async function listCollectionGroup<T = Record<string, unknown>>(collectionId: string): Promise<Doc<T>[]> {
+  const url = `${BASE}/projects/${projectId()}/databases/(default)/documents:runQuery`;
+  const docs: Doc<T>[] = [];
+  let cursor: string | null = null;
+
+  while (true) {
+    const structuredQuery: Record<string, unknown> = {
+      from: [{ collectionId, allDescendants: true }],
+      orderBy: [{ field: { fieldPath: "__name__" }, direction: "ASCENDING" }],
+      limit: 300,
+    };
+    if (cursor) structuredQuery.startAt = { values: [{ referenceValue: cursor }], before: false };
+
+    const { body } = await request(url, { method: "POST", body: JSON.stringify({ structuredQuery }) });
+    const page = body as { document?: { name: string; fields?: Record<string, FirestoreValue> } }[];
+    let count = 0;
+    let last: string | null = null;
+    for (const entry of page) {
+      if (!entry.document) continue;
+      count++;
+      last = entry.document.name;
+      const parts = entry.document.name.split("/");
+      const id = parts.pop()!;
+      parts.pop(); // collectionId
+      const parentId = parts.pop();
+      docs.push({ id, parentId, data: decodeFields(entry.document.fields || {}) as T });
+    }
+    if (count < 300 || !last) break;
+    cursor = last;
+  }
   return docs;
 }
