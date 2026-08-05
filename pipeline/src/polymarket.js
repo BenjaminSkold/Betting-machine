@@ -5,10 +5,24 @@ const GAMMA = "https://gamma-api.polymarket.com";
 const CLOB = "https://clob.polymarket.com";
 const DATA = "https://data-api.polymarket.com";
 
-async function getJson(url) {
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Backfill fires hundreds of requests back-to-back with no pacing, which
+// trips Polymarket's rate limiting even though steady-state usage is nowhere
+// near their documented limits. Retry with backoff on 429/5xx instead of
+// failing the whole run over a transient throttle.
+async function getJson(url, attempt = 1) {
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${url}`);
-  return res.json();
+  if (res.ok) return res.json();
+
+  if ((res.status === 429 || res.status >= 500) && attempt <= 5) {
+    const delayMs = 500 * 2 ** (attempt - 1); // 500ms, 1s, 2s, 4s, 8s
+    await sleep(delayMs);
+    return getJson(url, attempt + 1);
+  }
+  throw new Error(`${res.status} ${res.statusText} for ${url}`);
 }
 
 // A competition's matches are split across several near-duplicate tags

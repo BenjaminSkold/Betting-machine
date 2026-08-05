@@ -162,6 +162,7 @@ async function main() {
     for (const event of toProcess) {
       await processMatch(db, competition, event);
       total++;
+      await new Promise((resolve) => setTimeout(resolve, 250)); // light pacing to avoid tripping rate limits
     }
   }
 
