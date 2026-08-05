@@ -117,7 +117,10 @@ async function processMatch(db, competition, event) {
 
   const matchRef = db.collection("matches").doc(String(event.id));
   const existing = await matchRef.get();
-  if (existing.exists && existing.data().tradesBackfilled) {
+  // marketConditionIds was added after some matches were already backfilled
+  // — require it too so those older docs get naturally healed on resume
+  // instead of staying permanently missing the field.
+  if (existing.exists && existing.data().tradesBackfilled && existing.data().marketConditionIds) {
     console.log(`  SKIP "${event.title}" — already backfilled (resumed run)`);
     return;
   }
@@ -141,6 +144,10 @@ async function processMatch(db, competition, event) {
       resolved: true,
       result,
       tradesBackfilled: true,
+      // Lets the wallet-ranking job join a trade's conditionId back to
+      // which leg (home/draw/away) it was betting on, and combined with
+      // `result`, whether that trade's side actually won.
+      marketConditionIds: { home: home.conditionId, draw: draw.conditionId, away: away.conditionId },
     },
     { merge: true }
   );

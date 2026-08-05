@@ -29,6 +29,14 @@ function yesPrice(market) {
   }
 }
 
+// Resolved markets settle to ~1/~0. Whichever leg settled to ~1 is the result.
+function resultFrom(home, draw, away) {
+  if (yesPrice(home) > 0.9) return "home";
+  if (yesPrice(draw) > 0.9) return "draw";
+  if (yesPrice(away) > 0.9) return "away";
+  return null;
+}
+
 function kickoffTimeOf(market, event) {
   // gameStartTime looks like "2026-08-05 16:30:00+00" — valid Postgres
   // timestamptz text, but not valid ISO 8601 (needs "+00:00", not "+00").
@@ -101,6 +109,7 @@ async function processMatch(db, competition, event) {
 
   // Everything for this match lands in one atomic commit — one write
   // request per match per run, regardless of how much changed.
+  const resolved = Boolean(home.closed);
   const batch = db.batch();
   batch.set(
     matchRef,
@@ -110,8 +119,9 @@ async function processMatch(db, competition, event) {
       awayTeam,
       kickoffTime: kickoffTime.toISOString(),
       polymarketMarketId: String(event.id),
-      resolved: Boolean(home.closed),
-      result: null, // settlement logic is a later milestone
+      resolved,
+      result: resolved ? resultFrom(home, draw, away) : null,
+      marketConditionIds: { home: home.conditionId, draw: draw.conditionId, away: away.conditionId },
     },
     { merge: true }
   );

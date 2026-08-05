@@ -151,6 +151,28 @@ class CollectionRef {
   doc(id) {
     return new DocRef(this.projectId, `${this.path}/${id}`);
   }
+
+  // Lists every document in this collection (paginated internally). Only
+  // needed for read-side tooling (inspection, the wallet-aggregation job) —
+  // the pipeline's write paths always address documents by known id.
+  async list() {
+    const base = `${BASE}/projects/${this.projectId}/databases/(default)/documents/${this.path}`;
+    const docs = [];
+    let pageToken;
+    do {
+      const url = new URL(base);
+      url.searchParams.set("pageSize", "300");
+      if (pageToken) url.searchParams.set("pageToken", pageToken);
+      const { body } = await request("GET", url.toString());
+      for (const d of body.documents || []) {
+        const id = d.name.split("/").pop();
+        const data = decodeFields(d.fields || {});
+        docs.push({ id, data: () => data, ref: this.doc(id) });
+      }
+      pageToken = body.nextPageToken;
+    } while (pageToken);
+    return docs;
+  }
 }
 
 class Batch {
