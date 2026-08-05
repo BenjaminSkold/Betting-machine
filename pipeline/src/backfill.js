@@ -154,19 +154,47 @@ async function processMatch(db, competition, event) {
 async function main() {
   const db = getDb();
   let total = 0;
+  const permanentlyFailed = [];
 
   for (const competition of COMPETITIONS) {
     const matches = await findResolvedMatches(competition);
     const toProcess = matches.slice(0, LIMIT);
     console.log(`\n[${competition}] ${matches.length} resolved match(es) found, processing ${toProcess.length}`);
     for (const event of toProcess) {
-      await processMatch(db, competition, event);
-      total++;
+      // This project sees RESOURCE_EXHAUSTED / transient network errors well
+      // under any documented daily quota — looks like a burst-rate throttle
+      // on a fresh, unbilled Firestore project. Treat failures as
+      // recoverable: cool down and retry a few times before giving up on
+      // this one match and moving on (it'll be picked up on the next run,
+      // since already-done matches are skipped via tradesBackfilled).
+      let attempt = 1;
+      const maxAttempts = 4;
+      while (true) {
+        try {
+          await processMatch(db, competition, event);
+          total++;
+          break;
+        } catch (err) {
+          console.log(`  ERROR on "${event.title}" (attempt ${attempt}/${maxAttempts}): ${err.message}`);
+          if (attempt >= maxAttempts) {
+            permanentlyFailed.push(event.title);
+            break;
+          }
+          const cooldownMs = 30_000 * attempt; // 30s, 60s, 90s
+          console.log(`    cooling down ${cooldownMs / 1000}s before retry...`);
+          await new Promise((resolve) => setTimeout(resolve, cooldownMs));
+          attempt++;
+        }
+      }
       await new Promise((resolve) => setTimeout(resolve, 250)); // light pacing to avoid tripping rate limits
     }
   }
 
   console.log(`\nBackfill run done. ${total} match(es) processed.`);
+  if (permanentlyFailed.length > 0) {
+    console.log(`${permanentlyFailed.length} match(es) failed after ${4} attempts each — rerun the script to retry them:`);
+    for (const title of permanentlyFailed) console.log(`  - ${title}`);
+  }
 }
 
 main().catch((err) => {
