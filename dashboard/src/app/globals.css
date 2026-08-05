@@ -1,0 +1,108 @@
+@import "tailwindcss";
+
+/*
+ * Palette: the dataviz skill's validated default (references/palette.md).
+ * Light/dark both selected; dark values apply under prefers-color-scheme
+ * AND the viewer's explicit [data-theme="dark"] toggle, per the skill's
+ * required pattern (media query covers OS setting, data-theme scope covers
+ * the toggle, which must win both ways).
+ */
+:root {
+  color-scheme: light;
+  --surface-1: #fcfcfb; /* card/chart surface */
+  --page-plane: #f9f9f7; /* page background */
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --gridline: #e1e0d9;
+  --baseline: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.1);
+
+  /* categorical (fixed order, never cycled) */
+  --series-1: #2a78d6; /* blue   — home */
+  --series-2: #eb6834; /* orange — away */
+  --series-3: #1baf7a; /* aqua   — draw */
+
+  /* diverging (edge sign) */
+  --diverging-pos: #2a78d6; /* blue */
+  --diverging-neg: #e34948; /* red */
+  --diverging-mid: #f0efec;
+
+  /* status (fixed, never themed) */
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+  --status-good-text: #006300;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --surface-1: #1a1a19;
+    --page-plane: #0d0d0d;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --gridline: #2c2c2a;
+    --baseline: #383835;
+    --border: rgba(255, 255, 255, 0.1);
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --diverging-pos: #3987e5;
+    --diverging-neg: #e66767;
+    --diverging-mid: #383835;
+    --status-good-text: #0ca30c;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-1: #1a1a19;
+  --page-plane: #0d0d0d;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
+  --gridline: #2c2c2a;
+  --baseline: #383835;
+  --border: rgba(255, 255, 255, 0.1);
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --diverging-pos: #3987e5;
+  --diverging-neg: #e66767;
+  --diverging-mid: #383835;
+  --status-good-text: #0ca30c;
+}
+
+@theme inline {
+  --color-surface-1: var(--surface-1);
+  --color-page-plane: var(--page-plane);
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+  --color-gridline: var(--gridline);
+  --color-baseline: var(--baseline);
+  --color-series-1: var(--series-1);
+  --color-series-2: var(--series-2);
+  --color-series-3: var(--series-3);
+  --color-diverging-pos: var(--diverging-pos);
+  --color-diverging-neg: var(--diverging-neg);
+  --color-status-good: var(--status-good);
+  --color-status-warning: var(--status-warning);
+  --color-status-serious: var(--status-serious);
+  --color-status-critical: var(--status-critical);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--page-plane);
+  color: var(--text-primary);
+}
+
+/* tabular figures only where numbers must align in columns */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
