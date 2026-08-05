@@ -1,3 +1,13 @@
+# Milestone 2 finding — Firestore free-tier write quota forced a schema change
+
+While running the first real backfill (2026-08-05), writing one Firestore document per trade — as PROJECT.md's data model literally specifies (`matches/{matchId}/trades/{tradeId}`) — hit `RESOURCE_EXHAUSTED: Quota exceeded` after only 10 matches (8,222 trade writes). A single active match can have 1,000-2,000+ trades; backfilling ~890 EPL/UCL/UEL matches at that rate would mean roughly 700k+ writes, dwarfing what the Spark (free) plan allows.
+
+**Fix:** trades are now stored as chunked arrays — `matches/{matchId}/tradeBatches/{batchId}` with a `trades: [...]` array field, ~300 trades per doc — instead of one doc per trade. This cut writes by ~270x in testing (2,192 trades → 8 docs) with no loss of function: nothing downstream needs to query individual trade documents directly, since the wallet-ranking job (Milestone 3) reads and aggregates every trade in memory regardless.
+
+- `collect.js` (live, ongoing) keeps a per-market cursor (`lastSeenTimestamp`) on each match doc so a rerun only fetches/writes trades newer than what's already stored, instead of rewriting a match's full trade history every 15 minutes. The new batch doc(s) and the cursor update commit in the same atomic Firestore batch, so a crash mid-write can't double-count trades on the next run.
+- `backfill.js` (one-time, historical) has no such concern — a resolved match's trades never change — so it just chunks the full list once and marks the match `tradesBackfilled: true` to make reruns skip already-done matches (resumable if interrupted).
+- This deviates from PROJECT.md's literal per-trade-document schema; the user chose this over throttling the same schema across ~5-7 weeks to stay under the daily quota, or skipping trade backfill entirely (which would have defeated the point of backfilling).
+
 # Milestone 1 findings — Polymarket API probe
 
 Ran against the live Polymarket APIs on **2026-08-05**. Script: `milestone1-probe/probe.js` (throwaway, not production code — no Firestore writes).

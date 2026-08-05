@@ -1,9 +1,9 @@
 import { getDb } from "./firestore.js";
 import { findResolvedMatches, getAllTrades, getPriceHistory, clobTokenIdsFor } from "./polymarket.js";
+import { chunk, toStoredTrade } from "./tradeBatches.js";
 
 const COMPETITIONS = ["EPL", "UCL", "UEL"];
 const CHECKPOINTS_MIN = [60, 15, 10];
-const BATCH_LIMIT = 500;
 // Optional cap per competition for smoke-testing before a full run.
 const LIMIT = process.env.BACKFILL_LIMIT ? Number(process.env.BACKFILL_LIMIT) : Infinity;
 
@@ -91,39 +91,29 @@ async function writeSnapshots(matchRef, home, draw, away, kickoffTime) {
   return written;
 }
 
+// Resolved matches never get new trades, so this is a one-time deterministic
+// write — chunk everything into a handful of array docs instead of one doc
+// per trade (the same 20k-writes/day-quota fix as collect.js, just without
+// needing a cursor since there's no "new since last run" to track here).
 async function writeTrades(db, matchRef, markets) {
-  let batch = db.batch();
-  let opsInBatch = 0;
-  let total = 0;
-
+  const allTrades = [];
   for (const market of markets) {
     const trades = await getAllTrades(market.conditionId);
-    for (const t of trades) {
-      const tradeId = `${t.transactionHash}_${t.asset}_${t.outcomeIndex}`;
-      batch.set(
-        matchRef.collection("trades").doc(tradeId),
-        {
-          wallet: t.proxyWallet,
-          side: t.side,
-          size: t.size,
-          price: t.price,
-          timestamp: t.timestamp,
-          outcome: t.outcome,
-          conditionId: t.conditionId,
-        },
-        { merge: true }
-      );
-      opsInBatch++;
-      total++;
-      if (opsInBatch >= BATCH_LIMIT) {
-        await batch.commit();
-        batch = db.batch();
-        opsInBatch = 0;
-      }
-    }
+    allTrades.push(...trades);
   }
-  if (opsInBatch > 0) await batch.commit();
-  return total;
+
+  const batch = db.batch();
+  let batchIndex = 0;
+  for (const group of chunk(allTrades)) {
+    batch.set(matchRef.collection("tradeBatches").doc(`batch_${batchIndex}`), {
+      trades: group.map(toStoredTrade),
+      count: group.length,
+      writtenAt: new Date().toISOString(),
+    });
+    batchIndex++;
+  }
+  if (batchIndex > 0) await batch.commit();
+  return allTrades.length;
 }
 
 async function processMatch(db, competition, event) {
@@ -133,9 +123,15 @@ async function processMatch(db, competition, event) {
     return;
   }
 
+  const matchRef = db.collection("matches").doc(String(event.id));
+  const existing = await matchRef.get();
+  if (existing.exists && existing.data().tradesBackfilled) {
+    console.log(`  SKIP "${event.title}" — already backfilled (resumed run)`);
+    return;
+  }
+
   const kickoffTime = kickoffTimeOf(home, event);
   const result = resultFrom(home, draw, away);
-  const matchRef = db.collection("matches").doc(String(event.id));
   await matchRef.set(
     {
       competition,
@@ -151,7 +147,8 @@ async function processMatch(db, competition, event) {
 
   const snapCount = await writeSnapshots(matchRef, home, draw, away, kickoffTime);
   const tradeCount = await writeTrades(db, matchRef, [home, draw, away]);
-  console.log(`  ${event.title}: result=${result ?? "unknown"} snapshots=${snapCount} trade-ops=${tradeCount}`);
+  await matchRef.set({ tradesBackfilled: true }, { merge: true });
+  console.log(`  ${event.title}: result=${result ?? "unknown"} snapshots=${snapCount} trades=${tradeCount}`);
 }
 
 async function main() {

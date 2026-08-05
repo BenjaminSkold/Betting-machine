@@ -1,10 +1,10 @@
 import { getDb } from "./firestore.js";
 import { findLiveMatches, getAllTrades } from "./polymarket.js";
+import { chunk, toStoredTrade } from "./tradeBatches.js";
 
 const COMPETITIONS = ["EPL", "UCL", "UEL"];
 const CHECKPOINTS_MIN = [60, 15, 10];
 const CHECKPOINT_TOLERANCE_MIN = 5; // catches a checkpoint even if cron cadence doesn't land exactly on it
-const BATCH_LIMIT = 500; // Firestore's per-batch write cap
 
 // A match event has 3 markets (home-win/draw/away-win), each phrased as
 // "Will {team} win on {date}?" or "... end in a draw?". Match them back to
@@ -57,40 +57,42 @@ async function writeSnapshotIfDue(matchRef, home, draw, away, kickoffTime) {
   }
 }
 
-async function writeTrades(db, matchRef, markets) {
-  let batch = db.batch();
-  let opsInBatch = 0;
-  let total = 0;
+// Only fetches/writes trades newer than what we've already stored per
+// market (cursor kept on the match doc), so a match with thousands of
+// historical trades doesn't get rewritten in full on every 15-min run —
+// only genuinely new trades cost a write. The batch-doc set and the cursor
+// update commit atomically so a crash mid-write can't double-count trades
+// on the next run.
+async function writeNewTrades(db, matchRef, markets, cursor) {
+  const lastSeenTimestamp = { ...(cursor.lastSeenTimestamp || {}) };
+  let nextBatchIndex = cursor.nextBatchIndex || 0;
+  const newTrades = [];
 
   for (const market of markets) {
     const trades = await getAllTrades(market.conditionId);
-    for (const t of trades) {
-      const tradeId = `${t.transactionHash}_${t.asset}_${t.outcomeIndex}`;
-      const tradeRef = matchRef.collection("trades").doc(tradeId);
-      batch.set(
-        tradeRef,
-        {
-          wallet: t.proxyWallet,
-          side: t.side,
-          size: t.size,
-          price: t.price,
-          timestamp: t.timestamp,
-          outcome: t.outcome,
-          conditionId: t.conditionId,
-        },
-        { merge: true }
-      );
-      opsInBatch++;
-      total++;
-      if (opsInBatch >= BATCH_LIMIT) {
-        await batch.commit();
-        batch = db.batch();
-        opsInBatch = 0;
-      }
+    const since = lastSeenTimestamp[market.conditionId] || 0;
+    const fresh = trades.filter((t) => t.timestamp > since);
+    if (trades.length > 0) {
+      lastSeenTimestamp[market.conditionId] = Math.max(...trades.map((t) => t.timestamp));
     }
+    newTrades.push(...fresh);
   }
-  if (opsInBatch > 0) await batch.commit();
-  return total;
+
+  if (newTrades.length === 0) return 0;
+
+  const batch = db.batch();
+  for (const group of chunk(newTrades)) {
+    const batchRef = matchRef.collection("tradeBatches").doc(`batch_${nextBatchIndex}`);
+    batch.set(batchRef, {
+      trades: group.map(toStoredTrade),
+      count: group.length,
+      writtenAt: new Date().toISOString(),
+    });
+    nextBatchIndex++;
+  }
+  batch.update(matchRef, { lastSeenTimestamp, nextBatchIndex });
+  await batch.commit();
+  return newTrades.length;
 }
 
 async function processMatch(db, competition, event) {
@@ -102,6 +104,9 @@ async function processMatch(db, competition, event) {
 
   const kickoffTime = kickoffTimeOf(home, event);
   const matchRef = db.collection("matches").doc(String(event.id));
+  const existing = await matchRef.get();
+  const cursor = existing.exists ? existing.data() : {};
+
   await matchRef.set(
     {
       competition,
@@ -116,8 +121,8 @@ async function processMatch(db, competition, event) {
   );
 
   await writeSnapshotIfDue(matchRef, home, draw, away, kickoffTime);
-  const tradeCount = await writeTrades(db, matchRef, [home, draw, away]);
-  console.log(`  ${event.title}: ${tradeCount} trades logged`);
+  const newTradeCount = await writeNewTrades(db, matchRef, [home, draw, away], cursor);
+  console.log(`  ${event.title}: ${newTradeCount} new trade(s)`);
 }
 
 async function main() {
