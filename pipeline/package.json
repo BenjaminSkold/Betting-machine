@@ -1,0 +1,15 @@
+{
+  "name": "confluence-pipeline",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Polymarket data collection + backfill jobs for the Confluence project. Writes into Firestore. Run via GitHub Actions cron.",
+  "scripts": {
+    "check-connection": "node src/checkConnection.js",
+    "collect": "node src/collect.js",
+    "backfill": "node src/backfill.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.0.0"
+  }
+}

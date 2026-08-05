@@ -1,1 +1,5 @@
-.env 
+.env
+node_modules/
+pipeline/node_modules/
+*firebase-adminsdk*.json
+serviceAccountKey.json

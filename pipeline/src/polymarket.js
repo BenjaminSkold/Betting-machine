@@ -1,0 +1,114 @@
+// Thin client around Polymarket's public read APIs. Every choice here is
+// backed by a real, verified finding — see NOTES.md in the repo root.
+
+const GAMMA = "https://gamma-api.polymarket.com";
+const CLOB = "https://clob.polymarket.com";
+const DATA = "https://data-api.polymarket.com";
+
+async function getJson(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${url}`);
+  return res.json();
+}
+
+// A competition's matches are split across several near-duplicate tags
+// depending on when/how each event was tagged (verified in Milestone 1).
+// Querying just one misses real matches.
+export const COMPETITION_TAGS = {
+  EPL: [306, 82, 103043],
+  UCL: [1234, 102469, 100977],
+  UEL: [100626, 102506, 101787],
+  UECL: [103866, 102763, 103989],
+};
+
+// Season-spanning series ids, used for backfill (and are a cleaner discovery
+// key than tag_id union in general — verified against the 2025-26 season).
+// UCL/UEL each also have an older series covering only 2024-25's knockout
+// rounds tail; those are intentionally excluded here as out of scope.
+export const COMPETITION_SERIES = {
+  EPL: [10188], // "Premier League 2025" — 2025-26 season, currently still the active series
+  UCL: [10204], // "UEFA Champions League 2025" — 2025-26 season + 2026-27 qualifiers so far
+  UEL: [10209], // "UEFA Europa League 2025"
+};
+
+// A real single-match event has a title like "Home vs. Away" (moneyline) and
+// 2-3 binary Yes/No markets. Sub-markets ("- Total Corners", "- Halftime
+// Result", etc.) share the same "X vs. Y" prefix but have a " - " suffix —
+// exclude those to isolate the moneyline event.
+export function looksLikeSingleMatch(event) {
+  if (!event.title || !event.title.includes(" vs. ")) return false;
+  if (event.title.includes(" - ")) return false;
+  const markets = event.markets || [];
+  return markets.length >= 2 && markets.length <= 3;
+}
+
+async function paginateEvents(paramName, id, { closed }) {
+  const byId = new Map();
+  let offset = 0;
+  // Gamma silently caps `limit` at 100 regardless of what's requested.
+  while (true) {
+    const url = `${GAMMA}/events?${paramName}=${id}&closed=${closed}&limit=100&offset=${offset}`;
+    const page = await getJson(url);
+    if (page.length === 0) break;
+    for (const e of page) byId.set(e.id, e);
+    offset += 100;
+  }
+  return [...byId.values()];
+}
+
+// Live/upcoming matches for a competition, unioned across its known tag ids.
+export async function findLiveMatches(competition) {
+  const tagIds = COMPETITION_TAGS[competition];
+  if (!tagIds) throw new Error(`Unknown competition: ${competition}`);
+  const byId = new Map();
+  for (const tagId of tagIds) {
+    const events = await paginateEvents("tag_id", tagId, { closed: false });
+    for (const e of events) byId.set(e.id, e);
+  }
+  return [...byId.values()].filter(looksLikeSingleMatch);
+}
+
+// Resolved matches for a competition's backfill season(s).
+export async function findResolvedMatches(competition) {
+  const seriesIds = COMPETITION_SERIES[competition];
+  if (!seriesIds) throw new Error(`No backfill series configured for: ${competition}`);
+  const byId = new Map();
+  for (const seriesId of seriesIds) {
+    const events = await paginateEvents("series_id", seriesId, { closed: true });
+    for (const e of events) byId.set(e.id, e);
+  }
+  return [...byId.values()].filter(looksLikeSingleMatch);
+}
+
+export function clobTokenIdsFor(market) {
+  try {
+    return JSON.parse(market.clobTokenIds || "[]");
+  } catch {
+    return [];
+  }
+}
+
+// `interval=max` is unreliable for markets more than a few weeks old — it can
+// silently return near-empty history for coarse fidelities (verified against
+// a year-old match). Always pass an explicit timestamp range instead.
+export async function getPriceHistory(tokenId, { startTs, endTs, fidelity = 10 }) {
+  const url = `${CLOB}/prices-history?market=${tokenId}&startTs=${startTs}&endTs=${endTs}&fidelity=${fidelity}`;
+  const data = await getJson(url);
+  return data.history || [];
+}
+
+// Fetches every trade for a market (conditionId), paginating past the
+// per-request limit. `market=` takes the conditionId, not a CLOB token id.
+export async function getAllTrades(conditionId, { pageSize = 500 } = {}) {
+  const all = [];
+  let offset = 0;
+  while (true) {
+    const url = `${DATA}/trades?market=${conditionId}&limit=${pageSize}&offset=${offset}`;
+    const page = await getJson(url);
+    if (page.length === 0) break;
+    all.push(...page);
+    offset += page.length;
+    if (page.length < pageSize) break;
+  }
+  return all;
+}
