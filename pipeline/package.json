@@ -9,7 +9,8 @@
     "collect": "node src/collect.js",
     "backfill": "node src/backfill.js",
     "rank-wallets": "node src/rankWallets.js",
-    "test": "node src/rankWallets.test.js"
+    "score-matches": "node src/scoreMatches.js",
+    "test": "node src/rankWallets.test.js && node src/scoreMatches.test.js"
   },
   "dependencies": {
     "google-auth-library": "^10.9.1"
