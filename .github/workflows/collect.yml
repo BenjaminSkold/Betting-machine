@@ -25,3 +25,14 @@ jobs:
       - run: node src/collect.js
         env:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+
+      # Scoring and paper-bet placement/settlement depend on collect.js's
+      # freshly-written snapshots and match results, so they run right
+      # after it in the same job rather than on their own schedule.
+      - run: node src/scoreMatches.js
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+
+      - run: node src/paperBets.js
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
