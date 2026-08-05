@@ -1,4 +1,4 @@
-import { getDb, withTimeout } from "./firestore.js";
+import { getDb } from "./firestoreRest.js";
 import { findResolvedMatches, getAllTrades, getPriceHistory, clobTokenIdsFor } from "./polymarket.js";
 import { chunk, toStoredTrade } from "./tradeBatches.js";
 
@@ -60,16 +60,22 @@ async function nearestPriceAt(tokenId, kickoffTime, minutesBefore) {
   return best.p;
 }
 
-async function writeSnapshots(matchRef, home, draw, away, kickoffTime) {
+// Figures out which checkpoint snapshots are missing and what they should
+// contain, without writing anything yet — the actual write is folded into
+// the single combined batch commit in processMatch, to keep write-request
+// count to one per match regardless of how many checkpoints/trade-chunks
+// there are (this project's real write-rate ceiling turned out to be the
+// binding constraint, not raw compute time).
+async function planSnapshots(matchRef, home, draw, away, kickoffTime) {
   const tokens = {
     home: clobTokenIdsFor(home)[0],
     draw: clobTokenIdsFor(draw)[0],
     away: clobTokenIdsFor(away)[0],
   };
-  let written = 0;
+  const plan = [];
   for (const checkpoint of CHECKPOINTS_MIN) {
     const snapRef = matchRef.collection("snapshots").doc(`checkpoint_${checkpoint}`);
-    const existing = await withTimeout(snapRef.get(), 15000, "snapshot get");
+    const existing = await snapRef.get();
     if (existing.exists) continue;
 
     const [homeP, drawP, awayP] = await Promise.all([
@@ -79,45 +85,27 @@ async function writeSnapshots(matchRef, home, draw, away, kickoffTime) {
     ]);
     if (homeP === null && drawP === null && awayP === null) continue;
 
-    await withTimeout(
-      snapRef.set({
+    plan.push({
+      ref: snapRef,
+      data: {
         capturedAt: null, // backfilled — there was no live "capture" moment
         minutesBeforeKickoff: checkpoint,
         prices: { home: homeP, draw: drawP, away: awayP },
         liquidity: null,
         backfilled: true,
-      }),
-      15000,
-      "snapshot set"
-    );
-    written++;
+      },
+    });
   }
-  return written;
+  return plan;
 }
 
-// Resolved matches never get new trades, so this is a one-time deterministic
-// write — chunk everything into a handful of array docs instead of one doc
-// per trade (the same 20k-writes/day-quota fix as collect.js, just without
-// needing a cursor since there's no "new since last run" to track here).
-async function writeTrades(db, matchRef, markets) {
+async function fetchAllTrades(markets) {
   const allTrades = [];
   for (const market of markets) {
     const trades = await getAllTrades(market.conditionId);
     allTrades.push(...trades);
   }
-
-  const batch = db.batch();
-  let batchIndex = 0;
-  for (const group of chunk(allTrades)) {
-    batch.set(matchRef.collection("tradeBatches").doc(`batch_${batchIndex}`), {
-      trades: group.map(toStoredTrade),
-      count: group.length,
-      writtenAt: new Date().toISOString(),
-    });
-    batchIndex++;
-  }
-  if (batchIndex > 0) await withTimeout(batch.commit(), 20000, "trades batch commit");
-  return allTrades.length;
+  return allTrades;
 }
 
 async function processMatch(db, competition, event) {
@@ -128,7 +116,7 @@ async function processMatch(db, competition, event) {
   }
 
   const matchRef = db.collection("matches").doc(String(event.id));
-  const existing = await withTimeout(matchRef.get(), 15000, "match get");
+  const existing = await matchRef.get();
   if (existing.exists && existing.data().tradesBackfilled) {
     console.log(`  SKIP "${event.title}" — already backfilled (resumed run)`);
     return;
@@ -136,27 +124,39 @@ async function processMatch(db, competition, event) {
 
   const kickoffTime = kickoffTimeOf(home, event);
   const result = resultFrom(home, draw, away);
-  await withTimeout(
-    matchRef.set(
-      {
-        competition,
-        homeTeam,
-        awayTeam,
-        kickoffTime: kickoffTime.toISOString(),
-        polymarketMarketId: String(event.id),
-        resolved: true,
-        result,
-      },
-      { merge: true }
-    ),
-    15000,
-    "match set"
-  );
+  const snapshotPlan = await planSnapshots(matchRef, home, draw, away, kickoffTime);
+  const trades = await fetchAllTrades([home, draw, away]);
 
-  const snapCount = await writeSnapshots(matchRef, home, draw, away, kickoffTime);
-  const tradeCount = await writeTrades(db, matchRef, [home, draw, away]);
-  await withTimeout(matchRef.set({ tradesBackfilled: true }, { merge: true }), 15000, "tradesBackfilled marker set");
-  console.log(`  ${event.title}: result=${result ?? "unknown"} snapshots=${snapCount} trades=${tradeCount}`);
+  // Everything for this match lands in one atomic commit — one write
+  // request no matter how many snapshots/trade-chunks it contains.
+  const batch = db.batch();
+  batch.set(
+    matchRef,
+    {
+      competition,
+      homeTeam,
+      awayTeam,
+      kickoffTime: kickoffTime.toISOString(),
+      polymarketMarketId: String(event.id),
+      resolved: true,
+      result,
+      tradesBackfilled: true,
+    },
+    { merge: true }
+  );
+  for (const { ref, data } of snapshotPlan) batch.set(ref, data);
+  let batchIndex = 0;
+  for (const group of chunk(trades)) {
+    batch.set(matchRef.collection("tradeBatches").doc(`batch_${batchIndex}`), {
+      trades: group.map(toStoredTrade),
+      count: group.length,
+      writtenAt: new Date().toISOString(),
+    });
+    batchIndex++;
+  }
+  await batch.commit();
+
+  console.log(`  ${event.title}: result=${result ?? "unknown"} snapshots=${snapshotPlan.length} trades=${trades.length}`);
 }
 
 async function main() {
@@ -169,12 +169,12 @@ async function main() {
     const toProcess = matches.slice(0, LIMIT);
     console.log(`\n[${competition}] ${matches.length} resolved match(es) found, processing ${toProcess.length}`);
     for (const event of toProcess) {
-      // This project sees RESOURCE_EXHAUSTED / transient network errors well
-      // under any documented daily quota — looks like a burst-rate throttle
-      // on a fresh, unbilled Firestore project. Treat failures as
-      // recoverable: cool down and retry a few times before giving up on
-      // this one match and moving on (it'll be picked up on the next run,
-      // since already-done matches are skipped via tradesBackfilled).
+      // This project's real write-rate ceiling is well under what a fresh,
+      // unbilled Firestore project's documented quotas would suggest —
+      // plausibly a provisional throttle that eases as the project ages.
+      // Treat failures as recoverable: cool down and retry a few times
+      // before giving up on this one match and moving on (it'll be picked
+      // up on the next run, since already-done matches are skipped).
       let attempt = 1;
       const maxAttempts = 4;
       while (true) {
@@ -194,13 +194,12 @@ async function main() {
           attempt++;
         }
       }
-      await new Promise((resolve) => setTimeout(resolve, 250)); // light pacing to avoid tripping rate limits
     }
   }
 
   console.log(`\nBackfill run done. ${total} match(es) processed.`);
   if (permanentlyFailed.length > 0) {
-    console.log(`${permanentlyFailed.length} match(es) failed after ${4} attempts each — rerun the script to retry them:`);
+    console.log(`${permanentlyFailed.length} match(es) failed after 4 attempts each — rerun the script to retry them:`);
     for (const title of permanentlyFailed) console.log(`  - ${title}`);
   }
 }

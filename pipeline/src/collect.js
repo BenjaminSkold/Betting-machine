@@ -1,4 +1,4 @@
-import { getDb, withTimeout } from "./firestore.js";
+import { getDb } from "./firestoreRest.js";
 import { findLiveMatches, getAllTrades } from "./polymarket.js";
 import { chunk, toStoredTrade } from "./tradeBatches.js";
 
@@ -40,36 +40,35 @@ function kickoffTimeOf(market, event) {
   return new Date(event.endDate);
 }
 
-async function writeSnapshotIfDue(matchRef, home, draw, away, kickoffTime) {
+// Figures out which checkpoint snapshot is due without writing it — the
+// actual write is folded into the single combined batch commit in
+// processMatch, to keep write-request count to one per match per run.
+async function planSnapshot(matchRef, home, draw, away, kickoffTime) {
   const minutesToKickoff = (kickoffTime.getTime() - Date.now()) / 60000;
   for (const checkpoint of CHECKPOINTS_MIN) {
     if (Math.abs(minutesToKickoff - checkpoint) > CHECKPOINT_TOLERANCE_MIN) continue;
     const snapRef = matchRef.collection("snapshots").doc(`checkpoint_${checkpoint}`);
-    const existing = await withTimeout(snapRef.get(), 15000, "snapshot get");
+    const existing = await snapRef.get();
     if (existing.exists) continue;
-    await withTimeout(
-      snapRef.set({
+    return {
+      ref: snapRef,
+      data: {
         capturedAt: new Date().toISOString(),
         minutesBeforeKickoff: checkpoint,
         prices: { home: yesPrice(home), draw: yesPrice(draw), away: yesPrice(away) },
         liquidity: Number(home.liquidity || 0) + Number(draw.liquidity || 0) + Number(away.liquidity || 0),
-      }),
-      15000,
-      "snapshot set"
-    );
-    console.log(`    snapshot @ ${checkpoint}min written`);
+      },
+    };
   }
+  return null;
 }
 
-// Only fetches/writes trades newer than what we've already stored per
-// market (cursor kept on the match doc), so a match with thousands of
-// historical trades doesn't get rewritten in full on every 15-min run —
-// only genuinely new trades cost a write. The batch-doc set and the cursor
-// update commit atomically so a crash mid-write can't double-count trades
-// on the next run.
-async function writeNewTrades(db, matchRef, markets, cursor) {
+// Only fetches trades newer than what we've already stored per market
+// (cursor kept on the match doc), so a match with thousands of historical
+// trades doesn't get rewritten in full on every 15-min run — only genuinely
+// new trades cost anything.
+async function planNewTrades(markets, cursor) {
   const lastSeenTimestamp = { ...(cursor.lastSeenTimestamp || {}) };
-  let nextBatchIndex = cursor.nextBatchIndex || 0;
   const newTrades = [];
 
   for (const market of markets) {
@@ -82,21 +81,7 @@ async function writeNewTrades(db, matchRef, markets, cursor) {
     newTrades.push(...fresh);
   }
 
-  if (newTrades.length === 0) return 0;
-
-  const batch = db.batch();
-  for (const group of chunk(newTrades)) {
-    const batchRef = matchRef.collection("tradeBatches").doc(`batch_${nextBatchIndex}`);
-    batch.set(batchRef, {
-      trades: group.map(toStoredTrade),
-      count: group.length,
-      writtenAt: new Date().toISOString(),
-    });
-    nextBatchIndex++;
-  }
-  batch.update(matchRef, { lastSeenTimestamp, nextBatchIndex });
-  await withTimeout(batch.commit(), 20000, "trades batch commit");
-  return newTrades.length;
+  return { newTrades, lastSeenTimestamp };
 }
 
 async function processMatch(db, competition, event) {
@@ -108,29 +93,49 @@ async function processMatch(db, competition, event) {
 
   const kickoffTime = kickoffTimeOf(home, event);
   const matchRef = db.collection("matches").doc(String(event.id));
-  const existing = await withTimeout(matchRef.get(), 15000, "match get");
+  const existing = await matchRef.get();
   const cursor = existing.exists ? existing.data() : {};
 
-  await withTimeout(
-    matchRef.set(
-      {
-        competition,
-        homeTeam,
-        awayTeam,
-        kickoffTime: kickoffTime.toISOString(),
-        polymarketMarketId: String(event.id),
-        resolved: Boolean(home.closed),
-        result: null, // settlement logic is a later milestone
-      },
-      { merge: true }
-    ),
-    15000,
-    "match set"
+  const snapshot = await planSnapshot(matchRef, home, draw, away, kickoffTime);
+  const { newTrades, lastSeenTimestamp } = await planNewTrades([home, draw, away], cursor);
+
+  // Everything for this match lands in one atomic commit — one write
+  // request per match per run, regardless of how much changed.
+  const batch = db.batch();
+  batch.set(
+    matchRef,
+    {
+      competition,
+      homeTeam,
+      awayTeam,
+      kickoffTime: kickoffTime.toISOString(),
+      polymarketMarketId: String(event.id),
+      resolved: Boolean(home.closed),
+      result: null, // settlement logic is a later milestone
+    },
+    { merge: true }
   );
 
-  await writeSnapshotIfDue(matchRef, home, draw, away, kickoffTime);
-  const newTradeCount = await writeNewTrades(db, matchRef, [home, draw, away], cursor);
-  console.log(`  ${event.title}: ${newTradeCount} new trade(s)`);
+  if (snapshot) {
+    batch.set(snapshot.ref, snapshot.data);
+    console.log(`    snapshot @ ${snapshot.data.minutesBeforeKickoff}min written`);
+  }
+
+  let nextBatchIndex = cursor.nextBatchIndex || 0;
+  for (const group of chunk(newTrades)) {
+    batch.set(matchRef.collection("tradeBatches").doc(`batch_${nextBatchIndex}`), {
+      trades: group.map(toStoredTrade),
+      count: group.length,
+      writtenAt: new Date().toISOString(),
+    });
+    nextBatchIndex++;
+  }
+  if (newTrades.length > 0) {
+    batch.update(matchRef, { lastSeenTimestamp, nextBatchIndex });
+  }
+
+  await batch.commit();
+  console.log(`  ${event.title}: ${newTrades.length} new trade(s)`);
 }
 
 async function main() {
@@ -155,15 +160,11 @@ async function main() {
     }
   }
 
-  await withTimeout(
-    db.collection("_system").doc("status").set({
-      lastSuccessfulRun: new Date().toISOString(),
-      matchesProcessed: totalMatches,
-      matchesFailed: failedMatches,
-    }),
-    15000,
-    "status set"
-  );
+  await db.collection("_system").doc("status").set({
+    lastSuccessfulRun: new Date().toISOString(),
+    matchesProcessed: totalMatches,
+    matchesFailed: failedMatches,
+  });
   console.log(`\nDone. ${totalMatches} match(es) processed, ${failedMatches} failed. lastSuccessfulRun updated.`);
 }
 

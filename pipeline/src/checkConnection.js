@@ -1,4 +1,4 @@
-import { getDb } from "./firestore.js";
+import { getDb } from "./firestoreRest.js";
 
 async function main() {
   const db = getDb();

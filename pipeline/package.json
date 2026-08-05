@@ -10,6 +10,6 @@
     "backfill": "node src/backfill.js"
   },
   "dependencies": {
-    "firebase-admin": "^13.0.0"
+    "google-auth-library": "^10.9.1"
   }
 }
