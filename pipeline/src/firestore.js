@@ -28,3 +28,25 @@ export function getDb() {
   }
   return getFirestore(app);
 }
+
+// The Firestore SDK's own internal retry (google-gax) waits up to 600s
+// before surfacing a RESOURCE_EXHAUSTED/UNAVAILABLE error — far too long to
+// sit inside an application-level retry loop. Race it against a short
+// timeout so our own backoff (in backfill.js) controls the pacing instead.
+// The abandoned underlying call is left to resolve/reject on its own; we
+// just stop waiting on it.
+export function withTimeout(promise, ms = 15000, label = "Firestore operation") {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}

@@ -1,4 +1,4 @@
-import { getDb } from "./firestore.js";
+import { getDb, withTimeout } from "./firestore.js";
 import { findLiveMatches, getAllTrades } from "./polymarket.js";
 import { chunk, toStoredTrade } from "./tradeBatches.js";
 
@@ -45,14 +45,18 @@ async function writeSnapshotIfDue(matchRef, home, draw, away, kickoffTime) {
   for (const checkpoint of CHECKPOINTS_MIN) {
     if (Math.abs(minutesToKickoff - checkpoint) > CHECKPOINT_TOLERANCE_MIN) continue;
     const snapRef = matchRef.collection("snapshots").doc(`checkpoint_${checkpoint}`);
-    const existing = await snapRef.get();
+    const existing = await withTimeout(snapRef.get(), 15000, "snapshot get");
     if (existing.exists) continue;
-    await snapRef.set({
-      capturedAt: new Date().toISOString(),
-      minutesBeforeKickoff: checkpoint,
-      prices: { home: yesPrice(home), draw: yesPrice(draw), away: yesPrice(away) },
-      liquidity: Number(home.liquidity || 0) + Number(draw.liquidity || 0) + Number(away.liquidity || 0),
-    });
+    await withTimeout(
+      snapRef.set({
+        capturedAt: new Date().toISOString(),
+        minutesBeforeKickoff: checkpoint,
+        prices: { home: yesPrice(home), draw: yesPrice(draw), away: yesPrice(away) },
+        liquidity: Number(home.liquidity || 0) + Number(draw.liquidity || 0) + Number(away.liquidity || 0),
+      }),
+      15000,
+      "snapshot set"
+    );
     console.log(`    snapshot @ ${checkpoint}min written`);
   }
 }
@@ -91,7 +95,7 @@ async function writeNewTrades(db, matchRef, markets, cursor) {
     nextBatchIndex++;
   }
   batch.update(matchRef, { lastSeenTimestamp, nextBatchIndex });
-  await batch.commit();
+  await withTimeout(batch.commit(), 20000, "trades batch commit");
   return newTrades.length;
 }
 
@@ -104,20 +108,24 @@ async function processMatch(db, competition, event) {
 
   const kickoffTime = kickoffTimeOf(home, event);
   const matchRef = db.collection("matches").doc(String(event.id));
-  const existing = await matchRef.get();
+  const existing = await withTimeout(matchRef.get(), 15000, "match get");
   const cursor = existing.exists ? existing.data() : {};
 
-  await matchRef.set(
-    {
-      competition,
-      homeTeam,
-      awayTeam,
-      kickoffTime: kickoffTime.toISOString(),
-      polymarketMarketId: String(event.id),
-      resolved: Boolean(home.closed),
-      result: null, // settlement logic is a later milestone
-    },
-    { merge: true }
+  await withTimeout(
+    matchRef.set(
+      {
+        competition,
+        homeTeam,
+        awayTeam,
+        kickoffTime: kickoffTime.toISOString(),
+        polymarketMarketId: String(event.id),
+        resolved: Boolean(home.closed),
+        result: null, // settlement logic is a later milestone
+      },
+      { merge: true }
+    ),
+    15000,
+    "match set"
   );
 
   await writeSnapshotIfDue(matchRef, home, draw, away, kickoffTime);
@@ -128,21 +136,35 @@ async function processMatch(db, competition, event) {
 async function main() {
   const db = getDb();
   let totalMatches = 0;
+  let failedMatches = 0;
 
   for (const competition of COMPETITIONS) {
     const matches = await findLiveMatches(competition);
     console.log(`[${competition}] ${matches.length} live match(es)`);
     for (const event of matches) {
-      await processMatch(db, competition, event);
-      totalMatches++;
+      try {
+        await processMatch(db, competition, event);
+        totalMatches++;
+      } catch (err) {
+        // Cron runs every 15 min, which is itself a natural retry — better
+        // to skip one throttled/flaky match than abort the whole run and
+        // lose every other match's snapshot/trade update for this cycle.
+        failedMatches++;
+        console.log(`  ERROR on "${event.title}", skipping this run: ${err.message}`);
+      }
     }
   }
 
-  await db.collection("_system").doc("status").set({
-    lastSuccessfulRun: new Date().toISOString(),
-    matchesProcessed: totalMatches,
-  });
-  console.log(`\nDone. ${totalMatches} match(es) processed. lastSuccessfulRun updated.`);
+  await withTimeout(
+    db.collection("_system").doc("status").set({
+      lastSuccessfulRun: new Date().toISOString(),
+      matchesProcessed: totalMatches,
+      matchesFailed: failedMatches,
+    }),
+    15000,
+    "status set"
+  );
+  console.log(`\nDone. ${totalMatches} match(es) processed, ${failedMatches} failed. lastSuccessfulRun updated.`);
 }
 
 main().catch((err) => {

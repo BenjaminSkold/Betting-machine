@@ -1,4 +1,4 @@
-import { getDb } from "./firestore.js";
+import { getDb, withTimeout } from "./firestore.js";
 import { findResolvedMatches, getAllTrades, getPriceHistory, clobTokenIdsFor } from "./polymarket.js";
 import { chunk, toStoredTrade } from "./tradeBatches.js";
 
@@ -69,7 +69,7 @@ async function writeSnapshots(matchRef, home, draw, away, kickoffTime) {
   let written = 0;
   for (const checkpoint of CHECKPOINTS_MIN) {
     const snapRef = matchRef.collection("snapshots").doc(`checkpoint_${checkpoint}`);
-    const existing = await snapRef.get();
+    const existing = await withTimeout(snapRef.get(), 15000, "snapshot get");
     if (existing.exists) continue;
 
     const [homeP, drawP, awayP] = await Promise.all([
@@ -79,13 +79,17 @@ async function writeSnapshots(matchRef, home, draw, away, kickoffTime) {
     ]);
     if (homeP === null && drawP === null && awayP === null) continue;
 
-    await snapRef.set({
-      capturedAt: null, // backfilled — there was no live "capture" moment
-      minutesBeforeKickoff: checkpoint,
-      prices: { home: homeP, draw: drawP, away: awayP },
-      liquidity: null,
-      backfilled: true,
-    });
+    await withTimeout(
+      snapRef.set({
+        capturedAt: null, // backfilled — there was no live "capture" moment
+        minutesBeforeKickoff: checkpoint,
+        prices: { home: homeP, draw: drawP, away: awayP },
+        liquidity: null,
+        backfilled: true,
+      }),
+      15000,
+      "snapshot set"
+    );
     written++;
   }
   return written;
@@ -112,7 +116,7 @@ async function writeTrades(db, matchRef, markets) {
     });
     batchIndex++;
   }
-  if (batchIndex > 0) await batch.commit();
+  if (batchIndex > 0) await withTimeout(batch.commit(), 20000, "trades batch commit");
   return allTrades.length;
 }
 
@@ -124,7 +128,7 @@ async function processMatch(db, competition, event) {
   }
 
   const matchRef = db.collection("matches").doc(String(event.id));
-  const existing = await matchRef.get();
+  const existing = await withTimeout(matchRef.get(), 15000, "match get");
   if (existing.exists && existing.data().tradesBackfilled) {
     console.log(`  SKIP "${event.title}" — already backfilled (resumed run)`);
     return;
@@ -132,22 +136,26 @@ async function processMatch(db, competition, event) {
 
   const kickoffTime = kickoffTimeOf(home, event);
   const result = resultFrom(home, draw, away);
-  await matchRef.set(
-    {
-      competition,
-      homeTeam,
-      awayTeam,
-      kickoffTime: kickoffTime.toISOString(),
-      polymarketMarketId: String(event.id),
-      resolved: true,
-      result,
-    },
-    { merge: true }
+  await withTimeout(
+    matchRef.set(
+      {
+        competition,
+        homeTeam,
+        awayTeam,
+        kickoffTime: kickoffTime.toISOString(),
+        polymarketMarketId: String(event.id),
+        resolved: true,
+        result,
+      },
+      { merge: true }
+    ),
+    15000,
+    "match set"
   );
 
   const snapCount = await writeSnapshots(matchRef, home, draw, away, kickoffTime);
   const tradeCount = await writeTrades(db, matchRef, [home, draw, away]);
-  await matchRef.set({ tradesBackfilled: true }, { merge: true });
+  await withTimeout(matchRef.set({ tradesBackfilled: true }, { merge: true }), 15000, "tradesBackfilled marker set");
   console.log(`  ${event.title}: result=${result ?? "unknown"} snapshots=${snapCount} trades=${tradeCount}`);
 }
 
