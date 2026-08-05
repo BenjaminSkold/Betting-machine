@@ -17,6 +17,12 @@ Real bugs found and fixed while building the dashboard (all verified before/afte
 
 **If resuming fresh**: read this file top to bottom, then `git log --oneline -20` for the exact sequence. `pipeline/serviceAccountKey.json` and `dashboard/.env.local` both hold live credentials (gitignored) — don't need to redo that setup.
 
+**Known, investigated, unresolved limitation**: `notFound()` (e.g. visiting `/matches/<bad-id>` or `/wallets/<bad-address>`) renders the correct not-found content in the body, but returns HTTP 200 instead of 404 — **only in a production build** (`next build && next start`). Dev mode (`next dev`) gets this right. Methodically ruled out as the cause, each verified with a real before/after test against a real production server, not assumed:
+- Any `loading.tsx` in the ancestor chain (confirmed: breaks it in *both* dev and prod, but that's a separate mechanism — the 200-in-prod-only issue persists even with zero `loading.tsx` files anywhere in the app)
+- The root `error.tsx` boundary
+- `export const dynamic = "force-dynamic"` on the affected pages
+This looks like a Next.js 16.3.0-specific framework behavior (possibly related to its new Cache Components/PPR direction generating a static shell for dynamic segments even without `cacheComponents` explicitly enabled) rather than anything fixable from application code. Not blocking — the page content is correct either way, this only affects the HTTP status code's correctness (matters for SEO/tooling, not for what a user sees). Worth re-checking against a newer Next.js patch release before spending more time on it.
+
 # Milestone 4 — confluence/edge scoring engine, as actually implemented
 
 `pipeline/src/scoreMatches.js`. Also unit-tested against hand-worked synthetic numbers (`scoreMatches.test.js`) since it depends on `wallets/{wallet}.tier === "watch"`, which doesn't exist yet (rankWallets.js hasn't had real data to run against — see below).
