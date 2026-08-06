@@ -11,6 +11,10 @@ export default async function WalletsPage() {
   const watchlisted = wallets
     .filter((w) => w.data.tier === "watch")
     .sort((a, b) => b.data.aggregateWinRate - a.data.aggregateWinRate);
+  const anyThinBestComp = watchlisted.some((w) => {
+    const best = Object.values(w.data.bySlice.byCompetition).sort((a, b) => (b.winRate ?? 0) - (a.winRate ?? 0))[0];
+    return best?.usedFallback;
+  });
 
   return (
     <div className="max-w-4xl">
@@ -50,7 +54,18 @@ export default async function WalletsPage() {
                     <td className="tabular px-4 py-2.5 text-right font-medium text-[var(--text-primary)]">{pct(w.data.aggregateWinRate)}</td>
                     <td className="tabular px-4 py-2.5 text-right text-[var(--text-primary)]">{pct(w.data.aggregateROI)}</td>
                     <td className="px-4 py-2.5 text-[var(--text-secondary)]">
-                      {bestComp ? `${bestComp[0]} (${pct(bestComp[1].winRate)})` : "—"}
+                      {bestComp ? (
+                        <>
+                          {bestComp[0]} ({pct(bestComp[1].winRate)})
+                          {bestComp[1].usedFallback && (
+                            <span className="ml-1 text-[var(--text-muted)]" title="Thin sample — this slice fell back to the shrinkage prior">
+                              *
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        "—"
+                      )}
                     </td>
                   </tr>
                 );
@@ -58,6 +73,9 @@ export default async function WalletsPage() {
             </tbody>
           </table>
         </div>
+      )}
+      {anyThinBestComp && (
+        <p className="mt-2 text-xs text-[var(--text-muted)]">* thin sample — that slice fell back to the shrinkage prior rather than a raw win rate.</p>
       )}
     </div>
   );
