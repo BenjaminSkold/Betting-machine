@@ -1,4 +1,4 @@
-import { edgeBucketLabel, segmentStats, sortByBucketOrder } from "./breakdown.ts";
+import { edgeBucketLabel, favoriteUnderdogLabel, segmentStats, sortByBucketOrder } from "./breakdown.ts";
 
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown) {
@@ -36,6 +36,12 @@ check(
   sortByBucketOrder(scrambled).map((s) => s.key),
   ["5–10pp", "15–25pp", "25pp+"]
 );
+
+check("priceAtBet just above 50% is a favorite", favoriteUnderdogLabel(0.51), "Favorite");
+check("priceAtBet at exactly 50% is an underdog (not a favorite)", favoriteUnderdogLabel(0.5), "Underdog");
+check("priceAtBet just below 50% is an underdog", favoriteUnderdogLabel(0.49), "Underdog");
+check("a heavy favorite is still just 'Favorite'", favoriteUnderdogLabel(0.9), "Favorite");
+check("a heavy underdog is still just 'Underdog'", favoriteUnderdogLabel(0.05), "Underdog");
 
 console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) FAILED.`);
 process.exit(failures === 0 ? 0 : 1);

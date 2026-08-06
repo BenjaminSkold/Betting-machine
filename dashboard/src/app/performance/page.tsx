@@ -1,7 +1,7 @@
 import StatTile from "@/components/StatTile";
 import { getMatches, getPaperBets } from "@/lib/data";
 import { MIN_SETTLED_BETS_TO_TRUST } from "@/lib/types";
-import { edgeBucketLabel, segmentStats, sortByBucketOrder, type Segment } from "@/lib/breakdown";
+import { edgeBucketLabel, favoriteUnderdogLabel, segmentStats, sortByBucketOrder, type Segment } from "@/lib/breakdown";
 
 function pct(x: number | null): string {
   return x !== null ? `${(x * 100).toFixed(1)}%` : "—";
@@ -40,6 +40,14 @@ export default async function PerformancePage() {
       (b) => b.data
     )
   );
+  // PROJECT.md's own open question: is the profit coming from backing
+  // underdogs the market underrates, or from "meh, roughly agrees with the
+  // market" edge? Answer it empirically instead of assuming either way.
+  const byFavoriteUnderdog = segmentStats(
+    decided,
+    (b) => favoriteUnderdogLabel(b.data.priceAtBet),
+    (b) => b.data
+  );
 
   return (
     <div className="max-w-4xl">
@@ -76,9 +84,10 @@ export default async function PerformancePage() {
             Same &quot;decided&quot; denominator as the numbers above — segments can&apos;t look better than the headline by quietly
             counting pending or voided bets.
           </p>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <SegmentTable title="By competition" segments={byCompetition} />
             <SegmentTable title="By edge at bet" segments={byEdgeBucket} />
+            <SegmentTable title="Favorite vs. underdog" segments={byFavoriteUnderdog} />
           </div>
         </div>
       )}

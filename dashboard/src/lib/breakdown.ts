@@ -64,3 +64,19 @@ export function sortByBucketOrder(segments: Segment[]): Segment[] {
     (a, b) => EDGE_BUCKETS.findIndex((e) => e.label === a.key) - EDGE_BUCKETS.findIndex((e) => e.label === b.key)
   );
 }
+
+// PROJECT.md lists this as an explicit open question: "whether underdog-
+// favoring edge or roughly-agrees-with-the-market edge is where the actual
+// paper profit comes from" — segment paper-bet profit by favorite-vs-
+// underdog and report back honestly, whichever way it points. A bet only
+// ever gets placed on the leg paperBets.js's decideBet already picked (the
+// one with positive edge clearing the threshold), so priceAtBet IS that
+// leg's own market-implied probability at bet time — no extra data or
+// join back to the full ConfluenceScore needed. In a 3-way market, >50% on
+// one leg is a strictly stronger claim than "plurality favorite" (the other
+// two legs must combine to under 50%), so this threshold doesn't need the
+// other two legs' prices to be a meaningful, hand-checkable favorite/dog
+// split.
+export function favoriteUnderdogLabel(priceAtBet: number): string {
+  return priceAtBet > 0.5 ? "Favorite" : "Underdog";
+}
