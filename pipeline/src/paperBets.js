@@ -18,6 +18,13 @@ const STAKE = process.env.PAPER_BET_STAKE ? Number(process.env.PAPER_BET_STAKE) 
 export function decideBet(score, { edgeThreshold = EDGE_THRESHOLD, stake = STAKE } = {}) {
   if (score.edge === null || score.edge === undefined) return null;
   if (score.edge <= edgeThreshold) return null;
+  // A price of exactly 0 divides-by-zero in settleBet's stake/priceAtBet;
+  // a price of exactly 1 has zero possible upside. Found by an independent
+  // code review — Polymarket's quantized outcomePrices can legitimately
+  // show "0" for a near-dead leg, and scoreMatches.js's marketImpliedProbability
+  // is the raw, unclipped market price (unlike probabilityEstimate).
+  const price = score.marketImpliedProbability;
+  if (price === null || price === undefined || price <= 0 || price >= 1) return null;
   return {
     matchId: score.matchId,
     scoreId: score.id,

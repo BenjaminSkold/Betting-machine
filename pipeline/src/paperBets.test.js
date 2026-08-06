@@ -21,6 +21,27 @@ check("edge below threshold does NOT bet", decideBet({ id: "s1", edge: 0.03, mat
 check("negative edge does NOT bet", decideBet({ id: "s1", edge: -0.2, matchId: "m1" }, opts), null);
 check("null edge does NOT bet", decideBet({ id: "s1", edge: null, matchId: "m1" }, opts), null);
 
+// --- Regression: a price of exactly 0 or 1 must not place a bet (found by
+// an independent code review — settleBet divides stake/priceAtBet, so a
+// zero price is a division-by-zero waiting to happen on settlement, and
+// Polymarket's quantized outcomePrices can legitimately show "0" for a
+// near-dead leg on an otherwise-real edge).
+check(
+  "price of exactly 0 does NOT bet, even with a real edge",
+  decideBet({ id: "s1", matchId: "m1", trackedLeg: "home", edge: 0.06, marketImpliedProbability: 0 }, opts),
+  null
+);
+check(
+  "price of exactly 1 does NOT bet",
+  decideBet({ id: "s1", matchId: "m1", trackedLeg: "home", edge: 0.06, marketImpliedProbability: 1 }, opts),
+  null
+);
+check(
+  "null price does NOT bet",
+  decideBet({ id: "s1", matchId: "m1", trackedLeg: "home", edge: 0.06, marketImpliedProbability: null }, opts),
+  null
+);
+
 const bet = decideBet({ id: "s1", matchId: "m1", trackedLeg: "home", edge: 0.06, marketImpliedProbability: 0.4 }, opts);
 check("bet stake matches configured stake", bet.stake, 10);
 check("bet priceAtBet matches market price at bet time", bet.priceAtBet, 0.4);

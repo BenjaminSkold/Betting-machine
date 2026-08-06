@@ -11,7 +11,7 @@
     "rank-wallets": "node src/rankWallets.js",
     "score-matches": "node src/scoreMatches.js",
     "paper-bets": "node src/paperBets.js",
-    "test": "node src/rankWallets.test.js && node src/scoreMatches.test.js && node src/paperBets.test.js"
+    "test": "node src/collect.test.js && node src/rankWallets.test.js && node src/scoreMatches.test.js && node src/paperBets.test.js"
   },
   "dependencies": {
     "google-auth-library": "^10.9.1"

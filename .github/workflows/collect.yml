@@ -22,6 +22,8 @@ jobs:
 
       - run: npm ci
 
+      - run: npm test
+
       - run: node src/collect.js
         env:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
@@ -29,10 +31,16 @@ jobs:
       # Scoring and paper-bet placement/settlement depend on collect.js's
       # freshly-written snapshots and match results, so they run right
       # after it in the same job rather than on their own schedule.
+      # if: always() so a collect.js failure (self-heals next cycle anyway)
+      # doesn't also skip scoring/paper-betting for every match that DID
+      # already have fresh data from an earlier successful run — the job
+      # still reports overall failure if collect.js failed.
       - run: node src/scoreMatches.js
+        if: always()
         env:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
 
       - run: node src/paperBets.js
+        if: always()
         env:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
