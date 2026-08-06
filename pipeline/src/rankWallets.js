@@ -4,12 +4,12 @@
 // before changing the thresholds below — they're deliberately simple,
 // documented guesses meant to be revisited once real data exists, not
 // tuned constants.
-import { appendFileSync, createReadStream, existsSync } from "node:fs";
+import { appendFileSync, createReadStream, existsSync, readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { getDb } from "./firestoreRest.js";
-import { chunk, toStoredTrade } from "./tradeBatches.js";
+import { toStoredTrade } from "./tradeBatches.js";
 import { findResolvedMatches, getAllTrades } from "./polymarket.js";
 import { isMainModule } from "./isMain.js";
 
@@ -26,15 +26,17 @@ const BACKFILL_COMPETITIONS = ["EPL", "UCL", "UEL"];
 // bypass is no longer needed).
 const POLYMARKET_CACHE_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", ".rankwallets-polymarket-cache.jsonl");
 
+// Tracks which wallets/{id} writes have already landed, for the same reason
+// as the fetch cache above: at ~56k individual writes paced ~1.1s apart
+// (Firestore's :commit batch endpoint turned out to be throttled far more
+// strictly than plain single-document writes — even a 25-write batch 429'd
+// after full retry backoff, while an isolated .set() always succeeds — so
+// batching isn't an option here), this phase alone runs for many hours.
+// One wallet address per line, appended as each write succeeds.
+const WRITTEN_WALLETS_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", ".rankwallets-written.txt");
+
 // Found this needs to be far smaller than Firestore's own 500-write limit
 // once writing hit the current project's real (severely constrained) write
-// ceiling: a 500-write commit consistently 429'd even after the full retry
-// budget, while a single isolated write always succeeds. Not confirmed
-// exactly where the real ceiling sits, but small batches are the pragmatic
-// middle ground between "1 at a time" (reliable but ~200k writes would take
-// a day) and "500 at once" (fast but doesn't land at all right now).
-const FIRESTORE_BATCH_LIMIT = 25;
-
 // "Enough resolved trades to say anything meaningful" — PROJECT.md's own
 // suggested starting point. Below this, a slice/wallet falls back to a
 // coarser number instead of reporting its own (too-noisy) rate.
@@ -385,13 +387,21 @@ async function main() {
   const toWrite = results.filter((r) => r.totalResolvedTrades >= MIN_TRADES);
   console.log(`\n${results.length} distinct wallet(s) total, ${toWrite.length} clear the ${MIN_TRADES}-trade activity bar and will be written.`);
 
-  console.log("\nWriting wallets/ ...");
-  for (const group of chunk(toWrite, FIRESTORE_BATCH_LIMIT)) {
-    const batch = db.batch();
-    for (const r of group) batch.set(db.collection("wallets").doc(r.wallet), r);
-    await batch.commit();
+  const alreadyWritten = existsSync(WRITTEN_WALLETS_PATH)
+    ? new Set(readFileSync(WRITTEN_WALLETS_PATH, "utf8").split("\n").filter(Boolean))
+    : new Set();
+  if (alreadyWritten.size > 0) console.log(`${alreadyWritten.size} wallet(s) already written in a previous run — skipping those.`);
+
+  console.log("\nWriting wallets/ one at a time (see rankWallets.js's own comment on why not batched)...");
+  let written = 0;
+  for (const r of toWrite) {
+    if (alreadyWritten.has(r.wallet)) continue;
+    await db.collection("wallets").doc(r.wallet).set(r);
+    appendFileSync(WRITTEN_WALLETS_PATH, r.wallet + "\n");
+    written++;
+    if (written % 100 === 0) console.log(`  ${written} written so far (${toWrite.length - alreadyWritten.size - written} remaining)...`);
   }
-  console.log("Done.");
+  console.log(`\nDone. ${written} wallet(s) written this run.`);
 }
 
 export {
