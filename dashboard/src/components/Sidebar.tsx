@@ -35,6 +35,7 @@ export default function Sidebar() {
       {open && <div className="fixed inset-0 z-30 bg-black/40 md:hidden" onClick={() => setOpen(false)} />}
 
       <aside
+        aria-label="Main navigation"
         className={`fixed inset-y-0 left-0 z-40 flex w-56 shrink-0 flex-col border-r border-[var(--border)] bg-[var(--surface-1)] px-4 py-6 transition-transform duration-200 md:static md:z-auto md:translate-x-0 ${
           open ? "translate-x-0" : "-translate-x-full"
         }`}

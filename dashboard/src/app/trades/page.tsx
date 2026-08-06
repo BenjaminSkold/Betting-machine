@@ -40,15 +40,23 @@ export default async function TradesPage({
       <h1 className="mb-1 text-2xl font-semibold text-[var(--text-primary)]">Trades</h1>
       <p className="mb-6 text-sm text-[var(--text-secondary)]">Every Tier 1 trade log, across every tracked match.</p>
 
-      <form className="mb-4 flex flex-wrap gap-3 rounded-lg border border-[var(--border)] bg-[var(--surface-1)] p-3">
+      <form role="search" aria-label="Filter trades" className="mb-4 flex flex-wrap gap-3 rounded-lg border border-[var(--border)] bg-[var(--surface-1)] p-3">
+        <label htmlFor="trade-wallet" className="sr-only">
+          Filter by wallet address
+        </label>
         <input
+          id="trade-wallet"
           type="text"
           name="wallet"
           defaultValue={params.wallet}
           placeholder="Filter by wallet address"
           className="flex-1 min-w-[220px] rounded-md border border-[var(--border)] bg-[var(--page-plane)] px-3 py-1.5 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)]"
         />
+        <label htmlFor="trade-competition" className="sr-only">
+          Filter by competition
+        </label>
         <select
+          id="trade-competition"
           name="competition"
           defaultValue={params.competition ?? ""}
           className="rounded-md border border-[var(--border)] bg-[var(--page-plane)] px-3 py-1.5 text-sm text-[var(--text-primary)]"
@@ -60,7 +68,11 @@ export default async function TradesPage({
             </option>
           ))}
         </select>
+        <label htmlFor="trade-outcome" className="sr-only">
+          Filter by outcome
+        </label>
         <select
+          id="trade-outcome"
           name="outcome"
           defaultValue={params.outcome ?? ""}
           className="rounded-md border border-[var(--border)] bg-[var(--page-plane)] px-3 py-1.5 text-sm text-[var(--text-primary)]"
@@ -99,12 +111,12 @@ export default async function TradesPage({
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-[var(--border)] text-left text-xs uppercase tracking-wide text-[var(--text-muted)]">
-                <th className="px-4 py-3">When</th>
-                <th className="px-4 py-3">Match</th>
-                <th className="px-4 py-3">Wallet</th>
-                <th className="px-4 py-3">Side</th>
-                <th className="tabular px-4 py-3 text-right">Price</th>
-                <th className="tabular px-4 py-3 text-right">Size</th>
+                <th scope="col" className="px-4 py-3">When</th>
+                <th scope="col" className="px-4 py-3">Match</th>
+                <th scope="col" className="px-4 py-3">Wallet</th>
+                <th scope="col" className="px-4 py-3">Side</th>
+                <th scope="col" className="tabular px-4 py-3 text-right">Price</th>
+                <th scope="col" className="tabular px-4 py-3 text-right">Size</th>
               </tr>
             </thead>
             <tbody>

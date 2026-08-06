@@ -64,15 +64,23 @@ export default async function MatchesPage({ searchParams }: { searchParams: Prom
         </div>
       </div>
 
-      <form className="mb-6 flex flex-wrap gap-3 rounded-lg border border-[var(--border)] bg-[var(--surface-1)] p-3">
+      <form role="search" aria-label="Filter matches" className="mb-6 flex flex-wrap gap-3 rounded-lg border border-[var(--border)] bg-[var(--surface-1)] p-3">
+        <label htmlFor="match-search" className="sr-only">
+          Search team name
+        </label>
         <input
+          id="match-search"
           type="text"
           name="q"
           defaultValue={params.q}
           placeholder="Search team name"
           className="flex-1 min-w-[220px] rounded-md border border-[var(--border)] bg-[var(--page-plane)] px-3 py-1.5 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)]"
         />
+        <label htmlFor="match-competition" className="sr-only">
+          Filter by competition
+        </label>
         <select
+          id="match-competition"
           name="competition"
           defaultValue={params.competition ?? ""}
           className="rounded-md border border-[var(--border)] bg-[var(--page-plane)] px-3 py-1.5 text-sm text-[var(--text-primary)]"

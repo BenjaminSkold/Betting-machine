@@ -66,12 +66,12 @@ export default async function PerformancePage() {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-[var(--border)] text-left text-xs uppercase tracking-wide text-[var(--text-muted)]">
-                <th className="px-4 py-3">Match</th>
-                <th className="px-4 py-3">Leg</th>
-                <th className="tabular px-4 py-3 text-right">Edge at bet</th>
-                <th className="tabular px-4 py-3 text-right">Stake</th>
-                <th className="px-4 py-3">Outcome</th>
-                <th className="tabular px-4 py-3 text-right">PnL</th>
+                <th scope="col" className="px-4 py-3">Match</th>
+                <th scope="col" className="px-4 py-3">Leg</th>
+                <th scope="col" className="tabular px-4 py-3 text-right">Edge at bet</th>
+                <th scope="col" className="tabular px-4 py-3 text-right">Stake</th>
+                <th scope="col" className="px-4 py-3">Outcome</th>
+                <th scope="col" className="tabular px-4 py-3 text-right">PnL</th>
               </tr>
             </thead>
             <tbody>

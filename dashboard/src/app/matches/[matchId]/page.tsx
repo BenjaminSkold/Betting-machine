@@ -132,6 +132,14 @@ function ScoreCard({
               <div key={leg}>
                 <div className="font-medium text-[var(--text-secondary)]">{legLabel[leg]}</div>
                 <table className="w-full text-[var(--text-secondary)]">
+                  <thead>
+                    <tr>
+                      <th scope="col" className="py-0.5 text-left font-medium">Wallet</th>
+                      <th scope="col" className="py-0.5 text-left font-medium">Direction</th>
+                      <th scope="col" className="py-0.5 text-left font-medium">Size</th>
+                      <th scope="col" className="py-0.5 text-left font-medium">Win rate</th>
+                    </tr>
+                  </thead>
                   <tbody>
                     {wallets.map((w, i) => (
                       <tr key={i}>

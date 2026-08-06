@@ -78,11 +78,11 @@ export default async function WalletDetailPage({ params }: { params: Promise<{ a
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-[var(--border)] text-left text-xs uppercase tracking-wide text-[var(--text-muted)]">
-                <th className="px-4 py-3">When</th>
-                <th className="px-4 py-3">Match</th>
-                <th className="px-4 py-3">Side</th>
-                <th className="tabular px-4 py-3 text-right">Price</th>
-                <th className="tabular px-4 py-3 text-right">Size</th>
+                <th scope="col" className="px-4 py-3">When</th>
+                <th scope="col" className="px-4 py-3">Match</th>
+                <th scope="col" className="px-4 py-3">Side</th>
+                <th scope="col" className="tabular px-4 py-3 text-right">Price</th>
+                <th scope="col" className="tabular px-4 py-3 text-right">Size</th>
               </tr>
             </thead>
             <tbody>
@@ -119,11 +119,11 @@ function SliceTable({ title, slices }: { title: string; slices: Wallet["bySlice"
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-[var(--border)] text-left text-xs uppercase tracking-wide text-[var(--text-muted)]">
-              <th className="px-4 py-3">Slice</th>
-              <th className="tabular px-4 py-3 text-right">Trades</th>
-              <th className="tabular px-4 py-3 text-right">Win rate</th>
-              <th className="tabular px-4 py-3 text-right">ROI</th>
-              <th className="px-4 py-3"></th>
+              <th scope="col" className="px-4 py-3">Slice</th>
+              <th scope="col" className="tabular px-4 py-3 text-right">Trades</th>
+              <th scope="col" className="tabular px-4 py-3 text-right">Win rate</th>
+              <th scope="col" className="tabular px-4 py-3 text-right">ROI</th>
+              <th scope="col" className="px-4 py-3"></th>
             </tr>
           </thead>
           <tbody>

@@ -29,11 +29,11 @@ export default async function WalletsPage() {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-[var(--border)] text-left text-xs uppercase tracking-wide text-[var(--text-muted)]">
-                <th className="px-4 py-3">Wallet</th>
-                <th className="tabular px-4 py-3 text-right">Trades</th>
-                <th className="tabular px-4 py-3 text-right">Win rate</th>
-                <th className="tabular px-4 py-3 text-right">ROI</th>
-                <th className="px-4 py-3">Best competition</th>
+                <th scope="col" className="px-4 py-3">Wallet</th>
+                <th scope="col" className="tabular px-4 py-3 text-right">Trades</th>
+                <th scope="col" className="tabular px-4 py-3 text-right">Win rate</th>
+                <th scope="col" className="tabular px-4 py-3 text-right">ROI</th>
+                <th scope="col" className="px-4 py-3">Best competition</th>
               </tr>
             </thead>
             <tbody>

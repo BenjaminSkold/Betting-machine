@@ -100,6 +100,8 @@ export default function PriceHistoryChart({
       <svg
         viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
         className="w-full"
+        role="img"
+        aria-label={`Price history for ${series.map((s) => s.label).join(", ")} — see the legend and table below for exact values`}
         onMouseMove={(e) => {
           const rect = e.currentTarget.getBoundingClientRect();
           const px = ((e.clientX - rect.left) / rect.width) * WIDTH;
