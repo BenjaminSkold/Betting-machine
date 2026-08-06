@@ -11,13 +11,20 @@ function sleep(ms) {
 
 // Backfill fires hundreds of requests back-to-back with no pacing, which
 // trips Polymarket's rate limiting even though steady-state usage is nowhere
-// near their documented limits. Retry with backoff on 429/5xx instead of
-// failing the whole run over a transient throttle.
+// near their documented limits. Retry with backoff on 429/408/5xx instead of
+// failing the whole run over a transient throttle or timeout. 408 was found
+// live during a long rankWallets.js run (thousands of requests across ~900
+// matches) — a single unretried 408 killed the entire run after it had
+// already done ~20 minutes of real work. 408 means the server gave up
+// waiting on THIS request, which says nothing about whether an identical
+// retry will fare any better, but it's the same class of "worth one more
+// try" transient failure 429/5xx already are, and NOT retrying it is
+// strictly worse for a long-running batch job like this one.
 async function getJson(url, attempt = 1) {
   const res = await fetch(url);
   if (res.ok) return res.json();
 
-  if ((res.status === 429 || res.status >= 500) && attempt <= 5) {
+  if ((res.status === 429 || res.status === 408 || res.status >= 500) && attempt <= 5) {
     const delayMs = 500 * 2 ** (attempt - 1); // 500ms, 1s, 2s, 4s, 8s
     await sleep(delayMs);
     return getJson(url, attempt + 1);

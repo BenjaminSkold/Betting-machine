@@ -4,12 +4,26 @@
 // before changing the thresholds below — they're deliberately simple,
 // documented guesses meant to be revisited once real data exists, not
 // tuned constants.
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { getDb } from "./firestoreRest.js";
 import { chunk, toStoredTrade } from "./tradeBatches.js";
 import { findResolvedMatches, getAllTrades } from "./polymarket.js";
 import { isMainModule } from "./isMain.js";
 
 const BACKFILL_COMPETITIONS = ["EPL", "UCL", "UEL"];
+
+// loadResolvedMatchesFromPolymarket's local resume cache — deliberately NOT
+// Firestore (that's the whole point of this bypass) and deliberately NOT in
+// $CLAUDE_JOB_DIR/tmp (that's wiped between sessions; this needs to survive
+// a crashed run). One JSON object per line, appended as each match finishes,
+// so a killed process loses at most its one in-flight match, not the whole
+// run — found necessary live, after an unretried 408 killed a run ~20
+// minutes and ~600 matches in. Delete this file to force a fully fresh
+// re-fetch (e.g. once Firestore's read quota is healthy again and this
+// bypass is no longer needed).
+const POLYMARKET_CACHE_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", ".rankwallets-polymarket-cache.jsonl");
 
 const FIRESTORE_BATCH_LIMIT = 500;
 
@@ -115,12 +129,34 @@ function resultFromMarkets(home, draw, away) {
 // for how this was found. Deliberately not the default path: re-fetching
 // everything Firestore already has is wasteful once Firestore itself is
 // healthy again, so this is opt-in via RANK_WALLETS_FROM_POLYMARKET=1.
+function loadPolymarketCache() {
+  if (!existsSync(POLYMARKET_CACHE_PATH)) return new Map();
+  const lines = readFileSync(POLYMARKET_CACHE_PATH, "utf8").split("\n").filter(Boolean);
+  const byId = new Map();
+  for (const line of lines) {
+    try {
+      const match = JSON.parse(line);
+      byId.set(match.id, match);
+    } catch {
+      // A truncated trailing line (process killed mid-write) — the match it
+      // belongs to just gets re-fetched below, same as if it were missing.
+    }
+  }
+  return byId;
+}
+
 async function loadResolvedMatchesFromPolymarket() {
-  const matches = [];
+  const cached = loadPolymarketCache();
+  if (cached.size > 0) console.log(`Resuming from local cache: ${cached.size} match(es) already fetched in a previous run.`);
+  const matches = [...cached.values()];
+
   for (const competition of BACKFILL_COMPETITIONS) {
     const events = await findResolvedMatches(competition);
     console.log(`[${competition}] ${events.length} resolved event(s) found, fetching trades for each...`);
     for (const event of events) {
+      const id = String(event.id);
+      if (cached.has(id)) continue; // already fetched (and cached) in a previous, possibly-interrupted run
+
       const { homeTeam, awayTeam, home, draw, away } = classifyMarketsFromEvent(event);
       if (!home || !draw || !away) {
         console.log(`  SKIP "${event.title}" — could not classify all 3 markets`);
@@ -133,15 +169,17 @@ async function loadResolvedMatchesFromPolymarket() {
       }
       const rawTrades = [...(await getAllTrades(home.conditionId)), ...(await getAllTrades(draw.conditionId)), ...(await getAllTrades(away.conditionId))];
       console.log(`  ${event.title}: result=${result} trades=${rawTrades.length}`);
-      matches.push({
-        id: String(event.id),
+      const match = {
+        id,
         competition,
         homeTeam,
         awayTeam,
         result,
         marketConditionIds: { home: home.conditionId, draw: draw.conditionId, away: away.conditionId },
         trades: rawTrades.map(toStoredTrade),
-      });
+      };
+      matches.push(match);
+      appendFileSync(POLYMARKET_CACHE_PATH, JSON.stringify(match) + "\n");
     }
     console.log(`  ${matches.length} total match(es) with a determined result so far, across all competitions processed.`);
   }
