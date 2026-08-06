@@ -140,14 +140,39 @@ export function dedupeTrades(trades) {
   return out;
 }
 
+function fetchTradesPage(conditionId, offset, pageSize) {
+  return getJson(`${DATA}/trades?market=${conditionId}&limit=${pageSize}&offset=${offset}`);
+}
+
 // Fetches every trade for a market (conditionId), paginating past the
 // per-request limit. `market=` takes the conditionId, not a CLOB token id.
-export async function getAllTrades(conditionId, { pageSize = 500 } = {}) {
+// `fetchPage` is injectable so the deep-offset-ceiling handling below is
+// testable without a live network call.
+export async function getAllTrades(conditionId, { pageSize = 500, fetchPage = fetchTradesPage } = {}) {
   const all = [];
   let offset = 0;
   while (true) {
-    const url = `${DATA}/trades?market=${conditionId}&limit=${pageSize}&offset=${offset}`;
-    const page = await getJson(url);
+    let page;
+    try {
+      page = await fetchPage(conditionId, offset, pageSize);
+    } catch (err) {
+      // Polymarket's Data API returns 400 (not an empty page) once offset
+      // pagination goes deep enough — observed consistently at offset=10500
+      // on two of the highest-volume markets backfilled so far (a two-legged
+      // tie's both fixtures, so not a one-off fluke). Treating this like any
+      // other error meant retrying it 4x with cooldowns that can never
+      // succeed, then discarding the match's ENTIRE trade history — exactly
+      // the highest-signal markets losing all their data. Once we already
+      // have real pages (offset > 0), take the ceiling as "no more data
+      // available" and keep what was fetched, same as an empty page would
+      // mean. A 400 on the very FIRST page (offset=0) is a different,
+      // real error (bad conditionId, etc.) and still throws.
+      if (offset > 0 && err.message.startsWith("400 ")) {
+        console.log(`    trade pagination ceiling hit at offset=${offset} for market ${conditionId} — keeping ${all.length} trade(s) fetched so far`);
+        break;
+      }
+      throw err;
+    }
     if (page.length === 0) break;
     all.push(...page);
     offset += page.length;
