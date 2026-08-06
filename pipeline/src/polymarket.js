@@ -21,7 +21,25 @@ function sleep(ms) {
 // try" transient failure 429/5xx already are, and NOT retrying it is
 // strictly worse for a long-running batch job like this one.
 async function getJson(url, attempt = 1) {
-  const res = await fetch(url);
+  let res;
+  try {
+    res = await fetch(url);
+  } catch (err) {
+    // fetch() itself rejecting (DNS failure, connection reset, TLS drop,
+    // etc.) is a different failure mode from an HTTP error status below —
+    // there's no res.status to check, because no response ever arrived.
+    // Found live: an ECONNRESET killed a long rankWallets.js run outright,
+    // since the retry logic only ever looked at res.status and never ran
+    // for a fetch() that rejected before producing a response at all. Same
+    // "worth one more try" reasoning as the status-code cases, just for a
+    // network-level failure instead of an application-level one.
+    if (attempt <= 5) {
+      const delayMs = 500 * 2 ** (attempt - 1); // 500ms, 1s, 2s, 4s, 8s
+      await sleep(delayMs);
+      return getJson(url, attempt + 1);
+    }
+    throw err;
+  }
   if (res.ok) return res.json();
 
   if ((res.status === 429 || res.status === 408 || res.status >= 500) && attempt <= 5) {
