@@ -4,7 +4,8 @@
 // before changing the thresholds below — they're deliberately simple,
 // documented guesses meant to be revisited once real data exists, not
 // tuned constants.
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { appendFileSync, createReadStream, existsSync } from "node:fs";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { getDb } from "./firestoreRest.js";
@@ -129,11 +130,17 @@ function resultFromMarkets(home, draw, away) {
 // for how this was found. Deliberately not the default path: re-fetching
 // everything Firestore already has is wasteful once Firestore itself is
 // healthy again, so this is opt-in via RANK_WALLETS_FROM_POLYMARKET=1.
-function loadPolymarketCache() {
-  if (!existsSync(POLYMARKET_CACHE_PATH)) return new Map();
-  const lines = readFileSync(POLYMARKET_CACHE_PATH, "utf8").split("\n").filter(Boolean);
+// Streams the cache line-by-line rather than reading the whole file into one
+// JS string — found necessary live once the cache grew past 800MB (892
+// matches, many with 10-20k+ trades each) and readFileSync threw
+// ERR_STRING_TOO_LONG (Node's ~512MB single-string ceiling). A stream has no
+// such limit regardless of file size.
+async function loadPolymarketCache() {
   const byId = new Map();
-  for (const line of lines) {
+  if (!existsSync(POLYMARKET_CACHE_PATH)) return byId;
+  const rl = createInterface({ input: createReadStream(POLYMARKET_CACHE_PATH, { encoding: "utf8" }), crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (!line) continue;
     try {
       const match = JSON.parse(line);
       byId.set(match.id, match);
@@ -146,7 +153,7 @@ function loadPolymarketCache() {
 }
 
 async function loadResolvedMatchesFromPolymarket() {
-  const cached = loadPolymarketCache();
+  const cached = await loadPolymarketCache();
   if (cached.size > 0) console.log(`Resuming from local cache: ${cached.size} match(es) already fetched in a previous run.`);
   const matches = [...cached.values()];
 
