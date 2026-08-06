@@ -175,6 +175,37 @@ export default function PriceHistoryChart({
           ))}
         </div>
       )}
+
+      {/* Table view — the sanctioned fallback for any series that can't rely on
+          color alone (the "draw" series fails the 3:1 contrast-vs-surface check
+          in light mode, and its direct label is exactly what collision-suppression
+          can remove). Also gives every value a non-hover, always-inspectable form. */}
+      <details className="mt-2">
+        <summary className="cursor-pointer text-xs text-[var(--text-secondary)]">View as table</summary>
+        <div className="mt-2 max-h-64 overflow-y-auto rounded-md border border-[var(--border)]">
+          <table className="w-full text-xs">
+            <thead className="sticky top-0 bg-[var(--surface-1)]">
+              <tr className="border-b border-[var(--border)] text-left uppercase tracking-wide text-[var(--text-muted)]">
+                <th scope="col" className="px-3 py-2">When</th>
+                <th scope="col" className="px-3 py-2">Leg</th>
+                <th scope="col" className="tabular px-3 py-2 text-right">Price</th>
+              </tr>
+            </thead>
+            <tbody>
+              {series
+                .flatMap((s) => s.points.map((p) => ({ ...p, key: s.key, label: s.label })))
+                .sort((a, b) => b.t - a.t)
+                .map((row, i) => (
+                  <tr key={i} className="border-b border-[var(--border)] last:border-0">
+                    <td className="tabular px-3 py-1.5 text-[var(--text-secondary)]">{new Date(row.t * 1000).toLocaleString()}</td>
+                    <td className="px-3 py-1.5 text-[var(--text-primary)]">{row.label}</td>
+                    <td className="tabular px-3 py-1.5 text-right text-[var(--text-primary)]">{(row.p * 100).toFixed(1)}%</td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </div>
+      </details>
     </div>
   );
 }
