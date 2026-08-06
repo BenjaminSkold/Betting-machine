@@ -26,7 +26,14 @@ const BACKFILL_COMPETITIONS = ["EPL", "UCL", "UEL"];
 // bypass is no longer needed).
 const POLYMARKET_CACHE_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", ".rankwallets-polymarket-cache.jsonl");
 
-const FIRESTORE_BATCH_LIMIT = 500;
+// Found this needs to be far smaller than Firestore's own 500-write limit
+// once writing hit the current project's real (severely constrained) write
+// ceiling: a 500-write commit consistently 429'd even after the full retry
+// budget, while a single isolated write always succeeds. Not confirmed
+// exactly where the real ceiling sits, but small batches are the pragmatic
+// middle ground between "1 at a time" (reliable but ~200k writes would take
+// a day) and "500 at once" (fast but doesn't land at all right now).
+const FIRESTORE_BATCH_LIMIT = 25;
 
 // "Enough resolved trades to say anything meaningful" — PROJECT.md's own
 // suggested starting point. Below this, a slice/wallet falls back to a
@@ -366,8 +373,20 @@ async function main() {
     }
   }
 
+  // Only wallets that clear the activity bar are analytically meaningful —
+  // the same MIN_TRADES bar already used everywhere else in this file (see
+  // sliceBy's own "enough" check). Found necessary live: this dataset has
+  // ~200k distinct wallets, the overwhelming majority one-off/low-volume
+  // noise traders that will never be tier:"watch" and are unlikely to ever
+  // be looked up individually. Writing all of them isn't just slow under
+  // the current write constraints, it's genuinely not useful — Tier 1's
+  // "log everyone, no filtering" is about the raw trade log (PROJECT.md),
+  // not about every one-off trader needing a processed ranking document.
+  const toWrite = results.filter((r) => r.totalResolvedTrades >= MIN_TRADES);
+  console.log(`\n${results.length} distinct wallet(s) total, ${toWrite.length} clear the ${MIN_TRADES}-trade activity bar and will be written.`);
+
   console.log("\nWriting wallets/ ...");
-  for (const group of chunk(results, FIRESTORE_BATCH_LIMIT)) {
+  for (const group of chunk(toWrite, FIRESTORE_BATCH_LIMIT)) {
     const batch = db.batch();
     for (const r of group) batch.set(db.collection("wallets").doc(r.wallet), r);
     await batch.commit();
