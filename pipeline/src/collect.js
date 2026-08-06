@@ -48,17 +48,25 @@ function kickoffTimeOf(market, event) {
   return new Date(event.endDate);
 }
 
-// Figures out which checkpoint snapshot is due without writing it — the
-// actual write is folded into the single combined batch commit in
+// Figures out which checkpoint snapshot(s) are due without writing them —
+// the actual write is folded into the single combined batch commit in
 // processMatch, to keep write-request count to one per match per run.
-async function planSnapshot(matchRef, home, draw, away, kickoffTime) {
+//
+// Returns every due-and-missing checkpoint, not just the first: the
+// checkpoints' tolerance windows overlap (15±5=[10,20] and 10±5=[5,15]
+// share [10,15]), so a cron run landing in that overlap must be able to
+// write both — an early `return` on the first match would silently lose
+// checkpoint 10 for any match whose kickoff aligns with the 15-min cron
+// grid, which is common. See NOTES.md.
+async function planSnapshots(matchRef, home, draw, away, kickoffTime) {
   const minutesToKickoff = (kickoffTime.getTime() - Date.now()) / 60000;
+  const due = [];
   for (const checkpoint of CHECKPOINTS_MIN) {
     if (Math.abs(minutesToKickoff - checkpoint) > CHECKPOINT_TOLERANCE_MIN) continue;
     const snapRef = matchRef.collection("snapshots").doc(`checkpoint_${checkpoint}`);
     const existing = await snapRef.get();
     if (existing.exists) continue;
-    return {
+    due.push({
       ref: snapRef,
       data: {
         capturedAt: new Date().toISOString(),
@@ -66,9 +74,9 @@ async function planSnapshot(matchRef, home, draw, away, kickoffTime) {
         prices: { home: yesPrice(home), draw: yesPrice(draw), away: yesPrice(away) },
         liquidity: Number(home.liquidity || 0) + Number(draw.liquidity || 0) + Number(away.liquidity || 0),
       },
-    };
+    });
   }
-  return null;
+  return due;
 }
 
 // Only fetches trades newer than what we've already stored per market
@@ -104,12 +112,14 @@ async function processMatch(db, competition, event) {
   const existing = await matchRef.get();
   const cursor = existing.exists ? existing.data() : {};
 
-  const snapshot = await planSnapshot(matchRef, home, draw, away, kickoffTime);
+  const snapshots = await planSnapshots(matchRef, home, draw, away, kickoffTime);
   const { newTrades, lastSeenTimestamp } = await planNewTrades([home, draw, away], cursor);
 
   // Everything for this match lands in one atomic commit — one write
   // request per match per run, regardless of how much changed.
-  const resolved = Boolean(home.closed);
+  // All three legs are negRisk-linked and expected to close together, but
+  // check all three rather than assume home's flag speaks for the others.
+  const resolved = Boolean(home.closed && draw.closed && away.closed);
   const batch = db.batch();
   batch.set(
     matchRef,
@@ -126,7 +136,7 @@ async function processMatch(db, competition, event) {
     { merge: true }
   );
 
-  if (snapshot) {
+  for (const snapshot of snapshots) {
     batch.set(snapshot.ref, snapshot.data);
     console.log(`    snapshot @ ${snapshot.data.minutesBeforeKickoff}min written`);
   }
@@ -178,7 +188,11 @@ async function main() {
   console.log(`\nDone. ${totalMatches} match(es) processed, ${failedMatches} failed. lastSuccessfulRun updated.`);
 }
 
-main().catch((err) => {
-  console.error("Collection run FAILED:", err);
-  process.exit(1);
-});
+export { planSnapshots, CHECKPOINTS_MIN, CHECKPOINT_TOLERANCE_MIN };
+
+if (import.meta.main) {
+  main().catch((err) => {
+    console.error("Collection run FAILED:", err);
+    process.exit(1);
+  });
+}
