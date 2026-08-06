@@ -5,8 +5,11 @@
 // documented guesses meant to be revisited once real data exists, not
 // tuned constants.
 import { getDb } from "./firestoreRest.js";
-import { chunk } from "./tradeBatches.js";
+import { chunk, toStoredTrade } from "./tradeBatches.js";
+import { findResolvedMatches, getAllTrades } from "./polymarket.js";
 import { isMainModule } from "./isMain.js";
+
+const BACKFILL_COMPETITIONS = ["EPL", "UCL", "UEL"];
 
 const FIRESTORE_BATCH_LIMIT = 500;
 
@@ -69,6 +72,78 @@ async function loadResolvedMatchesWithTrades(db) {
     const batches = await doc.ref.collection("tradeBatches").list();
     const trades = batches.flatMap((b) => b.data().trades || []);
     matches.push({ id: doc.id, ...data, trades });
+  }
+  return matches;
+}
+
+// A match event has 3 markets (home-win/draw/away-win), each phrased as
+// "Will {team} win on {date}?" or "... end in a draw?" — same parsing as
+// backfill.js/collect.js (duplicated rather than imported: backfill.js has
+// no import.meta.main gate, so importing it would run its whole main()).
+function classifyMarketsFromEvent(event) {
+  const [homeTeam, awayTeam] = event.title.split(" vs. ").map((s) => s.trim());
+  const found = {};
+  for (const m of event.markets) {
+    if (/end in a draw/i.test(m.question)) found.draw = m;
+    else if (m.question.startsWith(`Will ${homeTeam} `)) found.home = m;
+    else if (m.question.startsWith(`Will ${awayTeam} `)) found.away = m;
+  }
+  return { homeTeam, awayTeam, ...found };
+}
+
+function yesPriceFromMarket(market) {
+  try {
+    const prices = JSON.parse(market.outcomePrices || "[]");
+    return prices.length ? Number(prices[0]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function resultFromMarkets(home, draw, away) {
+  if (yesPriceFromMarket(home) > 0.9) return "home";
+  if (yesPriceFromMarket(draw) > 0.9) return "draw";
+  if (yesPriceFromMarket(away) > 0.9) return "away";
+  return null;
+}
+
+// Rebuilds the exact same {competition, homeTeam, awayTeam, result,
+// marketConditionIds, trades} shape loadResolvedMatchesWithTrades reads back
+// out of Firestore — but straight from Polymarket instead. For when
+// Firestore's own READ quota is what's blocking us, not Polymarket's (a
+// completely separate service with unrelated rate limits) — see NOTES.md
+// for how this was found. Deliberately not the default path: re-fetching
+// everything Firestore already has is wasteful once Firestore itself is
+// healthy again, so this is opt-in via RANK_WALLETS_FROM_POLYMARKET=1.
+async function loadResolvedMatchesFromPolymarket() {
+  const matches = [];
+  for (const competition of BACKFILL_COMPETITIONS) {
+    const events = await findResolvedMatches(competition);
+    console.log(`[${competition}] ${events.length} resolved event(s) found, fetching trades for each...`);
+    for (const event of events) {
+      const { homeTeam, awayTeam, home, draw, away } = classifyMarketsFromEvent(event);
+      if (!home || !draw || !away) {
+        console.log(`  SKIP "${event.title}" — could not classify all 3 markets`);
+        continue;
+      }
+      const result = resultFromMarkets(home, draw, away);
+      if (!result) {
+        console.log(`  SKIP "${event.title}" — no determined result (postponed/voided)`);
+        continue; // matches this file's own filter: needs a determined result
+      }
+      const rawTrades = [...(await getAllTrades(home.conditionId)), ...(await getAllTrades(draw.conditionId)), ...(await getAllTrades(away.conditionId))];
+      console.log(`  ${event.title}: result=${result} trades=${rawTrades.length}`);
+      matches.push({
+        id: String(event.id),
+        competition,
+        homeTeam,
+        awayTeam,
+        result,
+        marketConditionIds: { home: home.conditionId, draw: draw.conditionId, away: away.conditionId },
+        trades: rawTrades.map(toStoredTrade),
+      });
+    }
+    console.log(`  ${matches.length} total match(es) with a determined result so far, across all competitions processed.`);
   }
   return matches;
 }
@@ -178,8 +253,9 @@ function computeTrend(walletRows, prior) {
 
 async function main() {
   const db = getDb();
-  console.log("Loading resolved matches + trades...");
-  const matches = await loadResolvedMatchesWithTrades(db);
+  const fromPolymarket = process.env.RANK_WALLETS_FROM_POLYMARKET === "1";
+  console.log(fromPolymarket ? "Loading resolved matches + trades directly from Polymarket (Firestore reads bypassed)..." : "Loading resolved matches + trades...");
+  const matches = fromPolymarket ? await loadResolvedMatchesFromPolymarket() : await loadResolvedMatchesWithTrades(db);
   console.log(`${matches.length} resolved match(es) with a determined result.`);
 
   const rows = buildTradeRows(matches);
@@ -254,7 +330,21 @@ async function main() {
   console.log("Done.");
 }
 
-export { shrink, pnlAndStake, legFor, buildTradeRows, summarize, sliceBy, monthKey, computeTrend, MIN_TRADES, SHRINKAGE_K, TREND_THRESHOLD };
+export {
+  shrink,
+  pnlAndStake,
+  legFor,
+  buildTradeRows,
+  summarize,
+  sliceBy,
+  monthKey,
+  computeTrend,
+  classifyMarketsFromEvent,
+  resultFromMarkets,
+  MIN_TRADES,
+  SHRINKAGE_K,
+  TREND_THRESHOLD,
+};
 
 if (isMainModule(import.meta.url)) {
   main().catch((err) => {
