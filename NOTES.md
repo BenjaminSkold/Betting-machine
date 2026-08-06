@@ -1,3 +1,17 @@
+# Independent code review (2026-08-06) — 6 real fixes, all verified with tests
+
+Ran a full bug-hunting review across `pipeline/src/*.js` and `dashboard/src/**`, specifically told to find correctness/crash/security issues, not style. Every finding below was verified (not just trusted) before fixing, and every fix got a regression test that would have failed on the old code:
+
+1. **`collect.js` only ever wrote one of two overlapping due checkpoints.** The 60/15/10min ±5 tolerance windows overlap in [10,15] minutes-to-kickoff; `planSnapshot` returned the first due checkpoint instead of collecting all of them, so checkpoint 10 was silently never written for any match whose kickoff aligned with the 15-min cron grid (common). Fixed — see `collect.test.js`.
+2. **`scoreMatches.js` manufactured a phantom edge on lopsided markets with zero watchlisted signal.** Clipping `marketPrice + shift` to `[0.01, 0.99]` happened unconditionally, even when `shift` was exactly 0, so a legitimate 0.995 price got forced to 0.99 with no real signal behind it. Fixed — pass the market price through unclipped when there's no signal.
+3. **`getAllTrades` could return duplicate trades on an actively-trading market.** Offset pagination is racy under concurrent inserts. Now deduped by `(transactionHash, asset, outcomeIndex)`.
+4. **The live-collection cursor could silently and permanently drop a trade that tied the previous run's exact timestamp.** Strict `timestamp > since` with a scalar cursor. Now also tracks which trades were seen at the cursor's exact second.
+5. **`paperBets.js` could divide by zero on settlement** if a market's price was ever exactly 0 (Polymarket's quantized prices can legitimately show this for a near-dead leg). `decideBet` now rejects placing a bet when price is `<= 0` or `>= 1`.
+6. **A voided/postponed match left its paper bet "pending" forever** — `resolved:true, result:null` was treated identically to "not yet resolved". Now settles as its own `"void"` outcome (stake refunded), excluded from win-rate/ROI so it can't dilute real signal.
+7. Also: input validation on `matchId`/wallet-`address` route params before they reach a Firestore path (defense-in-depth, low real risk given this credential's full-read scope); tests wired into the GitHub Actions workflow (they existed but nothing ran them); `scoreMatches`/`paperBets` steps now run with `if: always()` so a `collect.js` failure doesn't also skip a whole cycle's downstream jobs.
+
+All of pipeline's and the dashboard's own test suites (`npm test` in each) pass. See individual commits for the full reasoning behind each fix.
+
 # Status as of 2026-08-05 night — overnight autonomous session
 
 Working solo overnight per the user's request ("finish as much as possible, don't deploy yet, keep checking the data pipeline"). Summary for anyone (human or a fresh Claude session) picking this up:
