@@ -66,7 +66,26 @@ function decodeFields(fields: Record<string, FirestoreValue>): Record<string, un
 
 const BASE = "https://firestore.googleapis.com/v1";
 
-async function request(url: string, init?: RequestInit): Promise<{ status: number; body: unknown }> {
+// Mirrors pipeline/src/firestoreRest.js's request() — same underlying
+// project, same quota, same two gaps found there: no retry at all (a single
+// transient 429 anywhere in a page's data fetch turned into a hard 500), and
+// no spacing between requests (listCollection/listCollectionGroup's
+// paginated calls fire back-to-back). See NOTES.md for how this was found.
+const MIN_REQUEST_INTERVAL_MS = 1100;
+let lastRequestAt = 0;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function paceRequest(): Promise<void> {
+  const elapsed = Date.now() - lastRequestAt;
+  if (elapsed < MIN_REQUEST_INTERVAL_MS) await sleep(MIN_REQUEST_INTERVAL_MS - elapsed);
+  lastRequestAt = Date.now();
+}
+
+async function request(url: string, init?: RequestInit, attempt = 1): Promise<{ status: number; body: unknown }> {
+  await paceRequest();
   const token = await getToken();
   const res = await fetch(url, {
     ...init,
@@ -75,6 +94,11 @@ async function request(url: string, init?: RequestInit): Promise<{ status: numbe
   });
   if (res.status === 404) return { status: 404, body: null };
   const text = await res.text();
+  if ((res.status === 429 || res.status >= 500) && attempt <= 6) {
+    const delayMs = 500 * 2 ** attempt; // 1s, 2s, 4s, 8s, 16s, 32s
+    await sleep(delayMs);
+    return request(url, init, attempt + 1);
+  }
   const parsed = text ? JSON.parse(text) : null;
   if (!res.ok) throw new Error(`Firestore REST ${init?.method ?? "GET"} ${url} -> ${res.status}: ${text.slice(0, 500)}`);
   return { status: res.status, body: parsed };
