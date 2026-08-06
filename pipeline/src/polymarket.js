@@ -111,6 +111,35 @@ export async function getPriceHistory(tokenId, { startTs, endTs, fidelity = 10 }
   return data.history || [];
 }
 
+// A trade's stable identity — same shape as the old per-trade Firestore doc
+// ID, before that schema was dropped for the batched-array one (see
+// NOTES.md). Shared by dedupeTrades here and collect.js's live-polling
+// cursor, which needs the same identity to avoid dropping a trade that ties
+// the previous run's max timestamp exactly.
+export function tradeKey(t) {
+  return `${t.transactionHash}_${t.asset}_${t.outcomeIndex}`;
+}
+
+// Offset-based pagination on a market that's still actively trading is
+// inherently racy — a new trade landing between page fetches shifts every
+// earlier row down by one position, so a later page can re-return a row a
+// previous page already returned. Found by an independent code review; not
+// confirmed which way the Data API actually sorts under concurrent inserts,
+// but deduping here is correct regardless of the answer and costs nothing
+// when there's no overlap. Exported standalone so it's testable without
+// mocking network calls.
+export function dedupeTrades(trades) {
+  const seen = new Set();
+  const out = [];
+  for (const t of trades) {
+    const key = tradeKey(t);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(t);
+  }
+  return out;
+}
+
 // Fetches every trade for a market (conditionId), paginating past the
 // per-request limit. `market=` takes the conditionId, not a CLOB token id.
 export async function getAllTrades(conditionId, { pageSize = 500 } = {}) {
@@ -124,5 +153,5 @@ export async function getAllTrades(conditionId, { pageSize = 500 } = {}) {
     offset += page.length;
     if (page.length < pageSize) break;
   }
-  return all;
+  return dedupeTrades(all);
 }

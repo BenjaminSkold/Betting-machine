@@ -1,5 +1,5 @@
 import { getDb } from "./firestoreRest.js";
-import { findLiveMatches, getAllTrades } from "./polymarket.js";
+import { findLiveMatches, getAllTrades, tradeKey } from "./polymarket.js";
 import { chunk, toStoredTrade } from "./tradeBatches.js";
 
 const COMPETITIONS = ["EPL", "UCL", "UEL"];
@@ -83,21 +83,36 @@ async function planSnapshots(matchRef, home, draw, away, kickoffTime) {
 // (cursor kept on the match doc), so a match with thousands of historical
 // trades doesn't get rewritten in full on every 15-min run — only genuinely
 // new trades cost anything.
-async function planNewTrades(markets, cursor) {
+async function planNewTrades(markets, cursor, fetchTrades = getAllTrades) {
   const lastSeenTimestamp = { ...(cursor.lastSeenTimestamp || {}) };
+  // Trades sharing the cursor's exact max timestamp from the previous run —
+  // needed because a strict `timestamp > since` filter silently and
+  // permanently drops any trade that ties the previous run's max second
+  // (plausible on an actively-trading market with many wallets). Found by
+  // an independent code review.
+  const lastSeenKeysAtCursor = { ...(cursor.lastSeenKeysAtCursor || {}) };
   const newTrades = [];
 
   for (const market of markets) {
-    const trades = await getAllTrades(market.conditionId);
+    const trades = await fetchTrades(market.conditionId);
     const since = lastSeenTimestamp[market.conditionId] || 0;
-    const fresh = trades.filter((t) => t.timestamp > since);
+    const seenAtSince = new Set(lastSeenKeysAtCursor[market.conditionId] || []);
+
+    const fresh = trades.filter((t) => {
+      if (t.timestamp > since) return true;
+      if (t.timestamp === since) return !seenAtSince.has(tradeKey(t));
+      return false;
+    });
+
     if (trades.length > 0) {
-      lastSeenTimestamp[market.conditionId] = Math.max(...trades.map((t) => t.timestamp));
+      const maxTs = Math.max(...trades.map((t) => t.timestamp));
+      lastSeenTimestamp[market.conditionId] = maxTs;
+      lastSeenKeysAtCursor[market.conditionId] = trades.filter((t) => t.timestamp === maxTs).map(tradeKey);
     }
     newTrades.push(...fresh);
   }
 
-  return { newTrades, lastSeenTimestamp };
+  return { newTrades, lastSeenTimestamp, lastSeenKeysAtCursor };
 }
 
 async function processMatch(db, competition, event) {
@@ -113,7 +128,7 @@ async function processMatch(db, competition, event) {
   const cursor = existing.exists ? existing.data() : {};
 
   const snapshots = await planSnapshots(matchRef, home, draw, away, kickoffTime);
-  const { newTrades, lastSeenTimestamp } = await planNewTrades([home, draw, away], cursor);
+  const { newTrades, lastSeenTimestamp, lastSeenKeysAtCursor } = await planNewTrades([home, draw, away], cursor);
 
   // Everything for this match lands in one atomic commit — one write
   // request per match per run, regardless of how much changed.
@@ -151,7 +166,7 @@ async function processMatch(db, competition, event) {
     nextBatchIndex++;
   }
   if (newTrades.length > 0) {
-    batch.update(matchRef, { lastSeenTimestamp, nextBatchIndex });
+    batch.update(matchRef, { lastSeenTimestamp, lastSeenKeysAtCursor, nextBatchIndex });
   }
 
   await batch.commit();
@@ -188,7 +203,7 @@ async function main() {
   console.log(`\nDone. ${totalMatches} match(es) processed, ${failedMatches} failed. lastSuccessfulRun updated.`);
 }
 
-export { planSnapshots, CHECKPOINTS_MIN, CHECKPOINT_TOLERANCE_MIN };
+export { planSnapshots, planNewTrades, CHECKPOINTS_MIN, CHECKPOINT_TOLERANCE_MIN };
 
 if (import.meta.main) {
   main().catch((err) => {
