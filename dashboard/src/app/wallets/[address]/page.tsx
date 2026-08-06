@@ -1,17 +1,25 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { getDoc } from "@/lib/firestore";
-import { getMatches, getMatchTrades } from "@/lib/data";
+import { getMatches, getMatchTrades, getWallet } from "@/lib/data";
 import type { Wallet } from "@/lib/types";
+import { isValidWalletAddress } from "@/lib/validate";
 
 function pct(x: number | null | undefined): string {
   if (x === null || x === undefined) return "—";
   return `${(x * 100).toFixed(1)}%`;
 }
 
+export async function generateMetadata({ params }: { params: Promise<{ address: string }> }) {
+  const { address } = await params;
+  if (!isValidWalletAddress(address)) return { title: "Wallet not found" };
+  const wallet = await getWallet(address);
+  return { title: wallet ? `${address.slice(0, 10)}… — Wallet` : "Wallet not found" };
+}
+
 export default async function WalletDetailPage({ params }: { params: Promise<{ address: string }> }) {
   const { address } = await params;
-  const wallet = await getDoc<Wallet>(`wallets/${address}`);
+  if (!isValidWalletAddress(address)) notFound();
+  const wallet = await getWallet(address);
   if (!wallet) notFound();
 
   const matches = await getMatches();

@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node src/lib/validate.test.ts"
   },
   "dependencies": {
     "google-auth-library": "^11.0.0",

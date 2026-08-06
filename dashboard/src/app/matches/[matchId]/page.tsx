@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { getMatch, getMatchScores, getMatchTrades } from "@/lib/data";
 import PriceHistoryChart, { type PricePoint } from "@/components/PriceHistoryChart";
 import type { Leg } from "@/lib/types";
+import { isValidMatchId } from "@/lib/validate";
 
 function pct(x: number | null | undefined): string {
   if (x === null || x === undefined) return "—";
@@ -17,8 +18,16 @@ function legSeries(trades: Awaited<ReturnType<typeof getMatchTrades>>, condition
     .sort((a, b) => a.t - b.t);
 }
 
+export async function generateMetadata({ params }: { params: Promise<{ matchId: string }> }) {
+  const { matchId } = await params;
+  if (!isValidMatchId(matchId)) return { title: "Match not found" };
+  const match = await getMatch(matchId);
+  return { title: match ? `${match.data.homeTeam} vs. ${match.data.awayTeam}` : "Match not found" };
+}
+
 export default async function MatchDetailPage({ params }: { params: Promise<{ matchId: string }> }) {
   const { matchId } = await params;
+  if (!isValidMatchId(matchId)) notFound();
   const match = await getMatch(matchId);
   if (!match) notFound();
 

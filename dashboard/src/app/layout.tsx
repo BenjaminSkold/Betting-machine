@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Confluence",
-  description: "Polymarket wallet-edge research dashboard",
+  title: { default: "Confluence", template: "%s | Confluence" },
+  description: "Polymarket wallet-edge research dashboard — where's the edge, right now.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
