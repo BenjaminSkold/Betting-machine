@@ -79,21 +79,39 @@ const BASE = "https://firestore.googleapis.com/v1";
 // up with sustained legitimate traffic). Serialize writes with a minimum
 // spacing here so every caller gets this for free instead of trusting every
 // call site to pace itself correctly.
-const MIN_WRITE_INTERVAL_MS = 1100;
-let lastWriteAt = 0;
+//
+// Originally write-only. A single isolated read/write always succeeds
+// (verified live), but CollectionRef.list()'s paginated GETs fire with zero
+// spacing between them — rankWallets.js listing hundreds of match docs (plus
+// one tradeBatches list PER match) still exhausted the quota even after 63s
+// of exponential backoff on the read that finally tripped it. The ceiling is
+// evidently on sustained REQUEST RATE, not "reads vs writes" — so pace every
+// request through the same gate, not just writes.
+const MIN_REQUEST_INTERVAL_MS = 1100;
+let lastRequestAt = 0;
 
 async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function paceWrite() {
-  const elapsed = Date.now() - lastWriteAt;
-  if (elapsed < MIN_WRITE_INTERVAL_MS) await sleep(MIN_WRITE_INTERVAL_MS - elapsed);
-  lastWriteAt = Date.now();
+async function paceRequest() {
+  const elapsed = Date.now() - lastRequestAt;
+  if (elapsed < MIN_REQUEST_INTERVAL_MS) await sleep(MIN_REQUEST_INTERVAL_MS - elapsed);
+  lastRequestAt = Date.now();
 }
 
-async function request(method, url, body) {
-  if (method !== "GET") await paceWrite();
+// Firestore quota recovery observed live to need tens of seconds, not the
+// sub-second blips polymarket.js's getJson retries for — so this backs off
+// further (up to ~32s between attempts) before giving up. Previously
+// request() had no retry at all: collect.js/backfill.js happened to survive
+// transient 429s only because THEY separately wrap a whole match in their
+// own retry-with-cooldown loop, but rankWallets.js/scoreMatches.js/
+// paperBets.js have no such wrapper and died on the very first 429 hit
+// during a bulk read (e.g. listing hundreds of match docs). Retrying here,
+// once, fixes it for every caller instead of requiring each script to grow
+// its own copy of the same loop.
+async function request(method, url, body, attempt = 1) {
+  await paceRequest();
   const token = await getToken();
   const res = await fetch(url, {
     method,
@@ -102,6 +120,11 @@ async function request(method, url, body) {
   });
   if (res.status === 404) return { status: 404, body: null };
   const text = await res.text();
+  if ((res.status === 429 || res.status >= 500) && attempt <= 6) {
+    const delayMs = 500 * 2 ** attempt; // 1s, 2s, 4s, 8s, 16s, 32s
+    await sleep(delayMs);
+    return request(method, url, body, attempt + 1);
+  }
   const parsed = text ? JSON.parse(text) : null;
   if (!res.ok) throw new Error(`Firestore REST ${method} ${url} -> ${res.status}: ${text.slice(0, 500)}`);
   return { status: res.status, body: parsed };
