@@ -6,9 +6,12 @@
 // full, documented formula. Read PROJECT.md's "Why edge, not just
 // confidence" and "Timing snapshots" sections before changing this.
 import { getDb } from "./firestoreRest.js";
+import { findLiveMatches, getAllTrades, getPriceHistory, clobTokenIdsFor } from "./polymarket.js";
+import { toStoredTrade } from "./tradeBatches.js";
 import { isMainModule } from "./isMain.js";
 
 const CHECKPOINTS_MIN = [60, 15, 10];
+const LIVE_COMPETITIONS = ["EPL", "UCL", "UEL"];
 
 // How far smart-wallet signal is allowed to move our probability estimate
 // away from the market's own price, at maximum one-sidedness and maximum
@@ -145,6 +148,157 @@ async function loadWatchlistedWallets(db) {
   return map;
 }
 
+// Firestore-backed loader — normalizes each match to
+// {id, homeTeam, awayTeam, kickoffTime, marketConditionIds, snapshots, trades}
+// so it can go through the same scoreMatch() as the Polymarket-direct path
+// below, regardless of which one main() picks.
+async function loadUpcomingMatchesFromFirestore(db) {
+  const matchDocs = await db.collection("matches").list();
+  const matches = [];
+  for (const matchDoc of matchDocs) {
+    const data = matchDoc.data();
+    if (data.resolved || !data.marketConditionIds) continue; // scoring is for upcoming matches
+    const snapshotDocs = await matchDoc.ref.collection("snapshots").list();
+    if (snapshotDocs.length === 0) continue;
+    const batches = await matchDoc.ref.collection("tradeBatches").list();
+    matches.push({
+      id: matchDoc.id,
+      homeTeam: data.homeTeam,
+      awayTeam: data.awayTeam,
+      kickoffTime: data.kickoffTime,
+      marketConditionIds: data.marketConditionIds,
+      snapshots: snapshotDocs.map((s) => ({ id: s.id, minutesBeforeKickoff: s.data().minutesBeforeKickoff, prices: s.data().prices })),
+      trades: batches.flatMap((b) => b.data().trades || []),
+    });
+  }
+  return matches;
+}
+
+// A match event has 3 markets (home-win/draw/away-win) — same parsing as
+// backfill.js/collect.js/rankWallets.js (duplicated for the same reason as
+// rankWallets.js: backfill.js has no import.meta.main gate to import from).
+export function classifyMarketsFromEvent(event) {
+  const [homeTeam, awayTeam] = event.title.split(" vs. ").map((s) => s.trim());
+  const found = {};
+  for (const m of event.markets) {
+    if (/end in a draw/i.test(m.question)) found.draw = m;
+    else if (m.question.startsWith(`Will ${homeTeam} `)) found.home = m;
+    else if (m.question.startsWith(`Will ${awayTeam} `)) found.away = m;
+  }
+  return { homeTeam, awayTeam, ...found };
+}
+
+export function kickoffTimeFromMarket(market, event) {
+  if (market.gameStartTime) {
+    const iso = market.gameStartTime.replace(" ", "T").replace(/([+-]\d{2})$/, "$1:00");
+    const parsed = new Date(iso);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return new Date(event.endDate);
+}
+
+// Same technique as backfill.js's own nearestPriceAt — finds the CLOB price
+// point closest to a given checkpoint's exact timestamp.
+async function nearestPriceAt(tokenId, kickoffTime, minutesBefore) {
+  if (!tokenId) return null;
+  const targetTs = Math.floor(kickoffTime.getTime() / 1000) - minutesBefore * 60;
+  const points = await getPriceHistory(tokenId, { startTs: targetTs - 15 * 60, endTs: targetTs + 15 * 60, fidelity: 1 });
+  if (points.length === 0) return null;
+  let best = points[0];
+  for (const p of points) {
+    if (Math.abs(p.t - targetTs) < Math.abs(best.t - targetTs)) best = p;
+  }
+  return best.p;
+}
+
+// Rebuilds the same normalized match shape straight from Polymarket instead
+// of reading matches/{id}/{snapshots,tradeBatches} back out of Firestore —
+// for when Firestore's own read quota is what's blocking us, not
+// Polymarket's. See rankWallets.js's loadResolvedMatchesFromPolymarket for
+// the identical pattern and NOTES.md for how this was found. Opt-in via
+// SCORE_MATCHES_FROM_POLYMARKET=1.
+async function loadUpcomingMatchesFromPolymarket() {
+  const matches = [];
+  for (const competition of LIVE_COMPETITIONS) {
+    const events = await findLiveMatches(competition);
+    console.log(`[${competition}] ${events.length} live event(s) found`);
+    for (const event of events) {
+      const { homeTeam, awayTeam, home, draw, away } = classifyMarketsFromEvent(event);
+      if (!home || !draw || !away) continue;
+
+      const kickoffTime = kickoffTimeFromMarket(home, event);
+      const tokens = { home: clobTokenIdsFor(home)[0], draw: clobTokenIdsFor(draw)[0], away: clobTokenIdsFor(away)[0] };
+
+      const snapshots = [];
+      for (const checkpoint of CHECKPOINTS_MIN) {
+        const [homeP, drawP, awayP] = await Promise.all([
+          nearestPriceAt(tokens.home, kickoffTime, checkpoint),
+          nearestPriceAt(tokens.draw, kickoffTime, checkpoint),
+          nearestPriceAt(tokens.away, kickoffTime, checkpoint),
+        ]);
+        if (homeP === null && drawP === null && awayP === null) continue;
+        snapshots.push({ id: `checkpoint_${checkpoint}`, minutesBeforeKickoff: checkpoint, prices: { home: homeP, draw: drawP, away: awayP } });
+      }
+      if (snapshots.length === 0) continue;
+
+      const rawTrades = [...(await getAllTrades(home.conditionId)), ...(await getAllTrades(draw.conditionId)), ...(await getAllTrades(away.conditionId))];
+      matches.push({
+        id: String(event.id),
+        homeTeam,
+        awayTeam,
+        kickoffTime: kickoffTime.toISOString(),
+        marketConditionIds: { home: home.conditionId, draw: draw.conditionId, away: away.conditionId },
+        snapshots,
+        trades: rawTrades.map(toStoredTrade),
+      });
+      console.log(`  ${event.title}: ${snapshots.length} checkpoint(s), ${rawTrades.length} trade(s)`);
+    }
+  }
+  return matches;
+}
+
+// Scores every not-yet-frozen checkpoint for one normalized match, writing
+// each new confluenceScores doc. Shared by both loaders above so they can
+// never silently drift in scoring behavior.
+async function scoreMatch(db, match, walletsByAddress) {
+  let scored = 0;
+  const kickoffMs = new Date(match.kickoffTime).getTime();
+  for (const snapshot of match.snapshots) {
+    const scoreId = `${match.id}_${snapshot.id}`;
+    const existing = await db.collection("confluenceScores").doc(scoreId).get();
+    if (existing.exists) continue;
+
+    // Only trades that happened at-or-before this checkpoint — otherwise a
+    // score computed for "60 min before kickoff" would be leaking in trades
+    // that actually happened later, which would make the 60/15/10
+    // checkpoint comparison Milestone 4 exists to enable meaningless.
+    const checkpointMs = kickoffMs - snapshot.minutesBeforeKickoff * 60 * 1000;
+    const tradesSoFar = match.trades.filter((t) => t.timestamp * 1000 <= checkpointMs);
+
+    const result = computeMatchScore(tradesSoFar, walletsByAddress, snapshot.prices, match.marketConditionIds);
+    if (!result) continue;
+
+    await db.collection("confluenceScores").doc(scoreId).set({
+      matchId: match.id,
+      snapshotId: snapshot.id,
+      minutesBeforeKickoff: snapshot.minutesBeforeKickoff,
+      trackedLeg: result.trackedLeg,
+      score: result.score,
+      probabilityEstimate: result.probabilityEstimate,
+      marketImpliedProbability: result.marketImpliedProbability,
+      edge: result.edge,
+      breakdown: result.breakdown,
+      frozenAt: new Date().toISOString(),
+    });
+    scored++;
+    console.log(
+      `  ${match.homeTeam} vs. ${match.awayTeam} @ ${snapshot.minutesBeforeKickoff}min: ` +
+        `tracked=${result.trackedLeg} edge=${(result.edge * 100).toFixed(1)}pp`
+    );
+  }
+  return scored;
+}
+
 async function main() {
   const db = getDb();
   const walletsByAddress = await loadWatchlistedWallets(db);
@@ -155,54 +309,13 @@ async function main() {
     return;
   }
 
-  const matches = await db.collection("matches").list();
+  const fromPolymarket = process.env.SCORE_MATCHES_FROM_POLYMARKET === "1";
+  console.log(fromPolymarket ? "Loading upcoming matches directly from Polymarket (Firestore reads bypassed)..." : "Loading upcoming matches...");
+  const matches = fromPolymarket ? await loadUpcomingMatchesFromPolymarket() : await loadUpcomingMatchesFromFirestore(db);
+
   let scored = 0;
-
-  for (const matchDoc of matches) {
-    const match = matchDoc.data();
-    if (match.resolved || !match.marketConditionIds) continue; // scoring is for upcoming matches
-
-    const snapshots = await matchDoc.ref.collection("snapshots").list();
-    if (snapshots.length === 0) continue;
-
-    const batches = await matchDoc.ref.collection("tradeBatches").list();
-    const allTrades = batches.flatMap((b) => b.data().trades || []);
-
-    for (const snapDoc of snapshots) {
-      const snapshot = snapDoc.data();
-      const scoreId = `${matchDoc.id}_${snapDoc.id}`;
-      const existing = await db.collection("confluenceScores").doc(scoreId).get();
-      if (existing.exists) continue;
-
-      // Only trades that happened at-or-before this checkpoint — otherwise
-      // a score computed for "60 min before kickoff" would be leaking in
-      // trades that actually happened later, which would make the 60/15/10
-      // checkpoint comparison Milestone 4 exists to enable meaningless.
-      const kickoffMs = new Date(match.kickoffTime).getTime();
-      const checkpointMs = kickoffMs - snapshot.minutesBeforeKickoff * 60 * 1000;
-      const tradesSoFar = allTrades.filter((t) => t.timestamp * 1000 <= checkpointMs);
-
-      const result = computeMatchScore(tradesSoFar, walletsByAddress, snapshot.prices, match.marketConditionIds);
-      if (!result) continue;
-
-      await db.collection("confluenceScores").doc(scoreId).set({
-        matchId: matchDoc.id,
-        snapshotId: snapDoc.id,
-        minutesBeforeKickoff: snapshot.minutesBeforeKickoff,
-        trackedLeg: result.trackedLeg,
-        score: result.score,
-        probabilityEstimate: result.probabilityEstimate,
-        marketImpliedProbability: result.marketImpliedProbability,
-        edge: result.edge,
-        breakdown: result.breakdown,
-        frozenAt: new Date().toISOString(),
-      });
-      scored++;
-      console.log(
-        `  ${match.homeTeam} vs. ${match.awayTeam} @ ${snapshot.minutesBeforeKickoff}min: ` +
-          `tracked=${result.trackedLeg} edge=${(result.edge * 100).toFixed(1)}pp`
-      );
-    }
+  for (const match of matches) {
+    scored += await scoreMatch(db, match, walletsByAddress);
   }
 
   console.log(`\nDone. ${scored} new confluence score(s) written.`);
