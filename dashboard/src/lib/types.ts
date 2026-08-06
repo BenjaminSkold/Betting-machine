@@ -4,6 +4,27 @@
 export type Competition = "EPL" | "UCL" | "UEL" | "UECL";
 export type Leg = "home" | "draw" | "away";
 
+// Flattened, match-annotated trade row — shared shape between the Trades
+// page and its CSV export so they can't silently drift apart.
+export interface TradeRow {
+  matchId: string;
+  competition: Competition;
+  homeTeam: string;
+  awayTeam: string;
+  wallet: string;
+  side: string;
+  outcome: string;
+  size: number;
+  price: number;
+  timestamp: number;
+}
+
+export interface TradeFilters {
+  wallet?: string;
+  competition?: string;
+  outcome?: string;
+}
+
 export interface Match {
   competition: Competition;
   homeTeam: string;

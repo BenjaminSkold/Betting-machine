@@ -49,7 +49,14 @@ export default async function PerformancePage() {
         <StatTile label="Pending / voided" value={`${pending.length} / ${voided.length}`} />
       </div>
 
-      <h2 className="mt-8 mb-3 text-sm font-semibold uppercase tracking-wide text-[var(--text-muted)]">Bet log</h2>
+      <div className="mt-8 mb-3 flex items-center justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-[var(--text-muted)]">Bet log</h2>
+        {bets.length > 0 && (
+          <a href="/performance/export" className="text-xs text-[var(--diverging-pos)] hover:underline">
+            Export CSV
+          </a>
+        )}
+      </div>
       {bets.length === 0 ? (
         <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-1)] px-4 py-6 text-sm text-[var(--text-muted)]">
           No paper bets placed yet.

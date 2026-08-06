@@ -1,6 +1,8 @@
 import { cache } from "react";
-import { getDoc, listCollection } from "./firestore";
-import type { ConfluenceScore, Match, PaperBet, Wallet } from "./types";
+import { getDoc, listCollection, listCollectionGroup } from "./firestore";
+import type { ConfluenceScore, Match, PaperBet, TradeFilters, TradeRow, Wallet } from "./types";
+
+type RawTrade = { wallet: string; side: string; size: number; price: number; timestamp: number; outcome: string; conditionId: string };
 
 export async function getMatches(): Promise<{ id: string; data: Match }[]> {
   return listCollection<Match>("matches");
@@ -40,4 +42,38 @@ export async function getPaperBets(): Promise<{ id: string; data: PaperBet }[]> 
 export async function getSystemStatus(): Promise<{ lastSuccessfulRun?: string; matchesProcessed?: number } | null> {
   const doc = await getDoc<{ lastSuccessfulRun?: string; matchesProcessed?: number }>("_system/status");
   return doc?.data ?? null;
+}
+
+// Shared between the Trades page and its CSV export, so the two can't
+// silently apply different filters. One collection-group query fetches
+// every match's tradeBatches in a bounded number of requests instead of one
+// round-trip per match (see NOTES.md — a real ~24s-load bug this fixed).
+export async function getFilteredTradeRows(filters: TradeFilters): Promise<TradeRow[]> {
+  const [matches, batches] = await Promise.all([getMatches(), listCollectionGroup<{ trades: RawTrade[] }>("tradeBatches")]);
+  const matchById = new Map(matches.map((m) => [m.id, m.data]));
+
+  const rows: TradeRow[] = [];
+  for (const batch of batches) {
+    const match = batch.parentId ? matchById.get(batch.parentId) : undefined;
+    if (!match) continue;
+    if (filters.competition && match.competition !== filters.competition) continue;
+    for (const t of batch.data.trades || []) {
+      if (filters.wallet && !t.wallet.toLowerCase().includes(filters.wallet.toLowerCase())) continue;
+      if (filters.outcome && t.outcome !== filters.outcome) continue;
+      rows.push({
+        matchId: batch.parentId!,
+        competition: match.competition,
+        homeTeam: match.homeTeam,
+        awayTeam: match.awayTeam,
+        wallet: t.wallet,
+        side: t.side,
+        outcome: t.outcome,
+        size: t.size,
+        price: t.price,
+        timestamp: t.timestamp,
+      });
+    }
+  }
+  rows.sort((a, b) => b.timestamp - a.timestamp);
+  return rows;
 }

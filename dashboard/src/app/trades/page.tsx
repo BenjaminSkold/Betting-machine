@@ -1,22 +1,6 @@
 import Link from "next/link";
-import { getMatches } from "@/lib/data";
-import { listCollectionGroup } from "@/lib/firestore";
+import { getFilteredTradeRows } from "@/lib/data";
 import type { Competition } from "@/lib/types";
-
-type RawTrade = { wallet: string; side: string; size: number; price: number; timestamp: number; outcome: string; conditionId: string };
-
-type TradeRow = {
-  matchId: string;
-  competition: Competition;
-  homeTeam: string;
-  awayTeam: string;
-  wallet: string;
-  side: string;
-  outcome: string;
-  size: number;
-  price: number;
-  timestamp: number;
-};
 
 const PAGE_SIZE = 100;
 
@@ -28,37 +12,7 @@ export default async function TradesPage({
   const params = await searchParams;
   const page = Math.max(1, Number(params.page) || 1);
 
-  // One collection-group query fetches every match's tradeBatches in a
-  // bounded number of requests, instead of one round-trip per match — N
-  // separate per-match fetches queue behind Node's per-host connection
-  // limit and get slower as N grows (60 matches measured at ~24s total
-  // even with Promise.all, since the concurrency ceiling is well under 60).
-  const [matches, batches] = await Promise.all([getMatches(), listCollectionGroup<{ trades: RawTrade[] }>("tradeBatches")]);
-  const matchById = new Map(matches.map((m) => [m.id, m.data]));
-
-  const rows: TradeRow[] = [];
-  for (const batch of batches) {
-    const match = batch.parentId ? matchById.get(batch.parentId) : undefined;
-    if (!match) continue;
-    if (params.competition && match.competition !== params.competition) continue;
-    for (const t of batch.data.trades || []) {
-      if (params.wallet && !t.wallet.toLowerCase().includes(params.wallet.toLowerCase())) continue;
-      if (params.outcome && t.outcome !== params.outcome) continue;
-      rows.push({
-        matchId: batch.parentId!,
-        competition: match.competition,
-        homeTeam: match.homeTeam,
-        awayTeam: match.awayTeam,
-        wallet: t.wallet,
-        side: t.side,
-        outcome: t.outcome,
-        size: t.size,
-        price: t.price,
-        timestamp: t.timestamp,
-      });
-    }
-  }
-  rows.sort((a, b) => b.timestamp - a.timestamp);
+  const rows = await getFilteredTradeRows(params);
   const total = rows.length;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const currentPage = Math.min(page, totalPages);
@@ -66,15 +20,20 @@ export default async function TradesPage({
 
   const competitions: Competition[] = ["EPL", "UCL", "UEL", "UECL"];
 
-  // Preserves the active filters when moving between pages.
-  function pageHref(targetPage: number) {
+  // Preserves the active filters when moving between pages or exporting.
+  function filterQs() {
     const qs = new URLSearchParams();
     if (params.wallet) qs.set("wallet", params.wallet);
     if (params.competition) qs.set("competition", params.competition);
     if (params.outcome) qs.set("outcome", params.outcome);
+    return qs;
+  }
+  function pageHref(targetPage: number) {
+    const qs = filterQs();
     qs.set("page", String(targetPage));
     return `/trades?${qs.toString()}`;
   }
+  const exportHref = `/trades/export?${filterQs().toString()}`;
 
   return (
     <div className="max-w-5xl">
@@ -125,7 +84,14 @@ export default async function TradesPage({
             ? "No trades match these filters."
             : `Showing ${((currentPage - 1) * PAGE_SIZE + 1).toLocaleString()}–${Math.min(currentPage * PAGE_SIZE, total).toLocaleString()} of ${total.toLocaleString()} trade(s).`}
         </span>
-        {totalPages > 1 && <span>Page {currentPage} of {totalPages}</span>}
+        <span className="flex items-center gap-3">
+          {totalPages > 1 && <span>Page {currentPage} of {totalPages}</span>}
+          {total > 0 && (
+            <a href={exportHref} className="text-[var(--diverging-pos)] hover:underline">
+              Export CSV
+            </a>
+          )}
+        </span>
       </div>
 
       {shown.length > 0 && (
