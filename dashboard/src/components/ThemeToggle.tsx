@@ -1,6 +1,6 @@
 "use client";
 
-import { useSyncExternalStore } from "react";
+import { useLayoutEffect, useSyncExternalStore } from "react";
 
 type Theme = "light" | "dark" | "system";
 
@@ -27,6 +27,18 @@ function getServerSnapshot(): Theme {
 
 export default function ThemeToggle() {
   const theme = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+
+  // Dev-only fix (no-op in production): React Strict Mode remounts once and
+  // resets <html> to only the attributes JSX manages, clearing the
+  // data-theme the root layout's inline script set before hydration. Without
+  // this, the toggle's own label still shows the right stored theme (it
+  // reads localStorage directly) while the actually-applied CSS theme
+  // silently desyncs back to the default. See Next's
+  // preventing-flash-before-hydration.md — "Re-applying attributes in
+  // development."
+  useLayoutEffect(() => {
+    apply(getSnapshot());
+  }, []);
 
   function cycle() {
     const next: Theme = theme === "system" ? "light" : theme === "light" ? "dark" : "system";

@@ -23,10 +23,16 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     <html
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      suppressHydrationWarning
     >
       <head>
-        {/* Runs before hydration so the stored theme applies with no flash of the wrong mode. */}
+        {/* Runs before hydration so the stored theme applies with no flash of the
+            wrong mode. type flips to text/plain on the client so the script never
+            re-runs (or warns) on hydration/re-render — see Next's own
+            preventing-flash-before-hydration.md guide. */}
         <script
+          type={typeof window === "undefined" ? "text/javascript" : "text/plain"}
+          suppressHydrationWarning
           dangerouslySetInnerHTML={{
             __html: `try{var t=localStorage.getItem('theme');if(t&&t!=='system')document.documentElement.setAttribute('data-theme',t);}catch(e){}`,
           }}
