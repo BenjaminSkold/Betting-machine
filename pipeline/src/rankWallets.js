@@ -23,6 +23,12 @@ const MIN_TRADES = 8;
 // quality bar below.
 const SHRINKAGE_K = 10;
 
+// How far a wallet's early-vs-recent shrunk win rate has to move before
+// it's called a real trend rather than noise — same 5pp bar used elsewhere
+// in this project (paperBets.js's edge threshold) for "a meaningful signal,"
+// not a fitted constant.
+const TREND_THRESHOLD = 0.05;
+
 function shrink(wins, n, prior) {
   if (n === 0) return prior;
   return (wins + SHRINKAGE_K * prior) / (n + SHRINKAGE_K);
@@ -86,6 +92,7 @@ function buildTradeRows(matches) {
         stake,
         competition: match.competition,
         team: leg === "home" ? match.homeTeam : leg === "away" ? match.awayTeam : null,
+        timestamp: trade.timestamp,
       });
     }
   }
@@ -128,6 +135,47 @@ function sliceBy(rows, keyFn, prior, fallback) {
   return out;
 }
 
+// "YYYY-MM" bucket, in UTC — coarse enough that even a moderately active
+// wallet clears MIN_TRADES within a bucket most months, fine enough to
+// actually show a within-season trend on a chart.
+function monthKey(timestamp) {
+  return new Date(timestamp * 1000).toISOString().slice(0, 7);
+}
+
+// A wallet "starting hot and fading" (or the reverse) is exactly the kind of
+// thing shrinkage toward a single career-long prior can hide — one aggregate
+// win rate has no way to say a wallet's edge has decayed. Deliberately
+// simple and hand-checkable rather than a fitted trend model (see
+// PROJECT.md's "no ML" constraint): sort a wallet's own trades
+// chronologically, split into an early half and a recent half by count (not
+// by calendar window, so both halves get a comparably-sized sample instead
+// of one side being starved by an uneven trading cadence), and compare
+// shrunk win rates. Requires MIN_TRADES on *both* halves independently —
+// a wallet that barely clears the aggregate activity bar shouldn't have a
+// trend claimed about it from an even thinner half-sample.
+function computeTrend(walletRows, prior) {
+  const sorted = [...walletRows].sort((a, b) => a.timestamp - b.timestamp);
+  const mid = Math.floor(sorted.length / 2);
+  const early = summarize(sorted.slice(0, mid), prior);
+  const recent = summarize(sorted.slice(mid), prior);
+  const earlyEnough = early.trades >= MIN_TRADES;
+  const recentEnough = recent.trades >= MIN_TRADES;
+
+  let label = "insufficient data";
+  let delta = null;
+  if (earlyEnough && recentEnough) {
+    delta = recent.shrunkWinRate - early.shrunkWinRate;
+    label = delta <= -TREND_THRESHOLD ? "declining" : delta >= TREND_THRESHOLD ? "improving" : "stable";
+  }
+
+  return {
+    early: { trades: early.trades, winRate: early.shrunkWinRate, roi: early.roi, usedFallback: !earlyEnough },
+    recent: { trades: recent.trades, winRate: recent.shrunkWinRate, roi: recent.roi, usedFallback: !recentEnough },
+    delta,
+    label,
+  };
+}
+
 async function main() {
   const db = getDb();
   console.log("Loading resolved matches + trades...");
@@ -160,6 +208,8 @@ async function main() {
 
     const byCompetition = sliceBy(walletRows, (r) => r.competition, globalPrior, aggregate);
     const byTeam = sliceBy(walletRows, (r) => r.team, globalPrior, aggregate);
+    const byMonth = sliceBy(walletRows, (r) => monthKey(r.timestamp), globalPrior, aggregate);
+    const trend = computeTrend(walletRows, globalPrior);
 
     results.push({
       wallet,
@@ -167,7 +217,8 @@ async function main() {
       aggregateWinRate: aggregate.shrunkWinRate,
       aggregateROI: aggregate.roi,
       tier,
-      bySlice: { byCompetition, byTeam },
+      bySlice: { byCompetition, byTeam, byMonth },
+      trend,
       lastUpdated: new Date().toISOString(),
     });
   }
@@ -183,6 +234,17 @@ async function main() {
     );
   }
 
+  const decliningWatch = results.filter((r) => r.tier === "watch" && r.trend.label === "declining");
+  if (decliningWatch.length > 0) {
+    console.log(`\n${decliningWatch.length} watched wallet(s) trending down (recent half well below their own early half):`);
+    for (const r of decliningWatch) {
+      console.log(
+        `  ${r.wallet.slice(0, 10)}... early=${(r.trend.early.winRate * 100).toFixed(1)}% ` +
+          `recent=${(r.trend.recent.winRate * 100).toFixed(1)}% (${(r.trend.delta * 100).toFixed(1)}pp)`
+      );
+    }
+  }
+
   console.log("\nWriting wallets/ ...");
   for (const group of chunk(results, FIRESTORE_BATCH_LIMIT)) {
     const batch = db.batch();
@@ -192,7 +254,7 @@ async function main() {
   console.log("Done.");
 }
 
-export { shrink, pnlAndStake, legFor, buildTradeRows, summarize, sliceBy, MIN_TRADES, SHRINKAGE_K };
+export { shrink, pnlAndStake, legFor, buildTradeRows, summarize, sliceBy, monthKey, computeTrend, MIN_TRADES, SHRINKAGE_K, TREND_THRESHOLD };
 
 if (isMainModule(import.meta.url)) {
   main().catch((err) => {

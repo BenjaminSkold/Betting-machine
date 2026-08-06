@@ -51,6 +51,16 @@ export interface WalletSlice {
   usedFallback: boolean;
 }
 
+// Early-half-vs-recent-half comparison of a wallet's own shrunk win rate —
+// see rankWallets.js's computeTrend for the full reasoning. Split by trade
+// count (not calendar time) so both halves get a comparable sample size.
+export interface WalletTrend {
+  early: WalletSlice;
+  recent: WalletSlice;
+  delta: number | null;
+  label: "improving" | "declining" | "stable" | "insufficient data";
+}
+
 export interface Wallet {
   totalResolvedTrades: number;
   aggregateWinRate: number;
@@ -59,7 +69,9 @@ export interface Wallet {
   bySlice: {
     byCompetition: Record<string, WalletSlice>;
     byTeam: Record<string, WalletSlice>;
+    byMonth: Record<string, WalletSlice>;
   };
+  trend: WalletTrend;
   lastUpdated: string;
 }
 

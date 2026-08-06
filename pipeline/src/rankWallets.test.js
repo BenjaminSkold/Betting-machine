@@ -1,6 +1,6 @@
 // Throwaway synthetic check for rankWallets.js's compute logic — hand-worked
 // expected numbers, run before trusting it against real Firestore data.
-import { shrink, pnlAndStake, legFor, buildTradeRows, summarize, SHRINKAGE_K } from "./rankWallets.js";
+import { shrink, pnlAndStake, legFor, buildTradeRows, summarize, monthKey, computeTrend, MIN_TRADES, SHRINKAGE_K } from "./rankWallets.js";
 
 let failures = 0;
 function check(label, actual, expected, tolerance = 1e-9) {
@@ -66,6 +66,51 @@ check("shrink large n approaches raw", shrink(900, 1000, 0.1) > 0.85, true);
 const summary = summarize(rows, 0.5);
 check("summarize trade count", summary.trades, 3);
 check("summarize raw win count via winRate*n", Math.round(summary.winRate * summary.trades), 1);
+
+// --- monthKey ---
+check("monthKey buckets to YYYY-MM (UTC)", monthKey(new Date("2026-03-15T00:00:00Z").getTime() / 1000), "2026-03");
+check("monthKey pads single-digit months", monthKey(new Date("2026-01-01T00:00:00Z").getTime() / 1000), "2026-01");
+
+// --- computeTrend ---
+// Helper: n rows all with the same win/loss outcome, at consecutive
+// timestamps starting from `startTs`, so the caller can build an early
+// block and a recent block with a controlled win rate in each.
+function trendRows(wins, losses, startTs) {
+  const rows = [];
+  for (let i = 0; i < wins; i++) rows.push({ win: true, pnl: 0, stake: 1, timestamp: startTs + i });
+  for (let i = 0; i < losses; i++) rows.push({ win: false, pnl: 0, stake: 1, timestamp: startTs + wins + i });
+  return rows;
+}
+
+// Early half: 9 wins/1 loss (n=10, shrunk=(9+5)/20=0.70). Recent half: 1
+// win/9 losses (n=10, shrunk=(1+5)/20=0.30). delta=-0.40, well past the
+// -5pp threshold. Rows passed in reverse chronological order deliberately —
+// computeTrend must sort by timestamp itself, not trust input order.
+const decliningRows = [...trendRows(1, 9, 100), ...trendRows(9, 1, 0)].reverse();
+const declining = computeTrend(decliningRows, 0.5);
+check("declining: early half shrunk win rate", declining.early.winRate, 0.7);
+check("declining: recent half shrunk win rate", declining.recent.winRate, 0.3);
+check("declining: delta", declining.delta, -0.4);
+check("declining: label", declining.label, "declining");
+
+const improvingRows = [...trendRows(1, 9, 0), ...trendRows(9, 1, 100)];
+const improving = computeTrend(improvingRows, 0.5);
+check("improving: label", improving.label, "improving");
+check("improving: delta", improving.delta, 0.4);
+
+const stableRows = [...trendRows(5, 5, 0), ...trendRows(5, 5, 100)];
+const stable = computeTrend(stableRows, 0.5);
+check("stable: delta is exactly 0", stable.delta, 0);
+check("stable: label", stable.label, "stable");
+
+// Only 10 rows total -> mid=5, both halves below MIN_TRADES(8) -> no trend
+// claimed at all, regardless of how lopsided the (too-thin) halves look.
+const thinRows = trendRows(5, 5, 0);
+check("thin sample: activity bar itself", thinRows.length < MIN_TRADES * 2, true);
+const thin = computeTrend(thinRows, 0.5);
+check("thin sample: label is insufficient data", thin.label, "insufficient data");
+check("thin sample: delta is null, not a misleading number", thin.delta, null);
+check("thin sample: still flags which half was thin", thin.early.usedFallback, true);
 
 console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) FAILED.`);
 process.exit(failures === 0 ? 0 : 1);

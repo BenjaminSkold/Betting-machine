@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getMatches, getMatchTrades, getWallet } from "@/lib/data";
-import type { Wallet } from "@/lib/types";
+import type { Wallet, WalletTrend } from "@/lib/types";
 import { isValidWalletAddress } from "@/lib/validate";
 
 function pct(x: number | null | undefined): string {
@@ -65,8 +65,11 @@ export default async function WalletDetailPage({ params }: { params: Promise<{ a
         </div>
       </div>
 
+      <TrendCard trend={wallet.data.trend} />
+
       <SliceTable title="By competition" slices={wallet.data.bySlice.byCompetition} />
       <SliceTable title="By team" slices={wallet.data.bySlice.byTeam} />
+      <SliceTable title="By month" slices={wallet.data.bySlice.byMonth} chronological />
 
       <h2 className="mt-8 mb-3 text-sm font-semibold uppercase tracking-wide text-[var(--text-muted)]">Recent activity</h2>
       {activity.length === 0 ? (
@@ -109,8 +112,21 @@ export default async function WalletDetailPage({ params }: { params: Promise<{ a
   );
 }
 
-function SliceTable({ title, slices }: { title: string; slices: Wallet["bySlice"]["byCompetition"] }) {
-  const entries = Object.entries(slices).sort((a, b) => (b[1].winRate ?? 0) - (a[1].winRate ?? 0));
+// `chronological` is for "By month": sorting by winRate there would scatter
+// the timeline and defeat the point of looking for a trend, so sort by the
+// "YYYY-MM" key itself (lexicographic == chronological) instead.
+function SliceTable({
+  title,
+  slices,
+  chronological = false,
+}: {
+  title: string;
+  slices: Wallet["bySlice"]["byCompetition"];
+  chronological?: boolean;
+}) {
+  const entries = Object.entries(slices).sort((a, b) =>
+    chronological ? a[0].localeCompare(b[0]) : (b[1].winRate ?? 0) - (a[1].winRate ?? 0)
+  );
   if (entries.length === 0) return null;
   return (
     <div className="mt-6">
@@ -139,6 +155,50 @@ function SliceTable({ title, slices }: { title: string; slices: Wallet["bySlice"
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+function TrendCard({ trend }: { trend: WalletTrend }) {
+  const dotColor =
+    trend.label === "declining" ? "var(--status-critical)" : trend.label === "improving" ? "var(--status-good)" : "var(--text-muted)";
+  const deltaColor = trend.delta === null ? "var(--text-muted)" : trend.delta >= 0 ? "var(--status-good-text)" : "var(--status-critical)";
+
+  return (
+    <div className="mt-6 rounded-lg border border-[var(--border)] bg-[var(--surface-1)] p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-[var(--text-muted)]">Trend</h2>
+        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--text-secondary)]">
+          <span className="inline-block h-2 w-2 rounded-full" style={{ background: dotColor }} />
+          {trend.label}
+        </span>
+      </div>
+      {trend.label === "insufficient data" ? (
+        <p className="text-sm text-[var(--text-muted)]">
+          Not enough trades in this wallet&apos;s early and recent halves yet to say anything about a trend — each half needs its own
+          activity bar cleared independently.
+        </p>
+      ) : (
+        <div className="grid grid-cols-3 gap-4">
+          <div>
+            <div className="text-xs text-[var(--text-secondary)]">Early half</div>
+            <div className="tabular text-lg font-semibold text-[var(--text-primary)]">{pct(trend.early.winRate)}</div>
+            <div className="text-xs text-[var(--text-muted)]">n={trend.early.trades}</div>
+          </div>
+          <div>
+            <div className="text-xs text-[var(--text-secondary)]">Recent half</div>
+            <div className="tabular text-lg font-semibold text-[var(--text-primary)]">{pct(trend.recent.winRate)}</div>
+            <div className="text-xs text-[var(--text-muted)]">n={trend.recent.trades}</div>
+          </div>
+          <div>
+            <div className="text-xs text-[var(--text-secondary)]">Change</div>
+            <div className="tabular text-lg font-semibold" style={{ color: deltaColor }}>
+              {trend.delta !== null && trend.delta >= 0 ? "+" : ""}
+              {trend.delta !== null ? `${(trend.delta * 100).toFixed(1)}pp` : "—"}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

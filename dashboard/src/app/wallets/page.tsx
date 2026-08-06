@@ -1,9 +1,26 @@
 import Link from "next/link";
 import { getWallets } from "@/lib/data";
+import type { WalletTrend } from "@/lib/types";
 
 function pct(x: number | null | undefined): string {
   if (x === null || x === undefined) return "—";
   return `${(x * 100).toFixed(1)}%`;
+}
+
+// Early-vs-recent-half comparison (see rankWallets.js's computeTrend) —
+// surfaced here so a wallet quietly fading after a hot start doesn't hide
+// behind one all-time aggregate win rate.
+function TrendCell({ trend }: { trend: WalletTrend }) {
+  if (trend.label === "insufficient data") {
+    return <span className="text-xs text-[var(--text-muted)]">—</span>;
+  }
+  const color = trend.label === "declining" ? "var(--status-critical)" : trend.label === "improving" ? "var(--status-good)" : "var(--text-muted)";
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--text-secondary)]" title={`recent half ${pct(trend.recent.winRate)} vs early half ${pct(trend.early.winRate)}`}>
+      <span className="inline-block h-2 w-2 rounded-full" style={{ background: color }} />
+      {trend.label}
+    </span>
+  );
 }
 
 export default async function WalletsPage() {
@@ -38,6 +55,7 @@ export default async function WalletsPage() {
                 <th scope="col" className="tabular px-4 py-3 text-right">Win rate</th>
                 <th scope="col" className="tabular px-4 py-3 text-right">ROI</th>
                 <th scope="col" className="px-4 py-3">Best competition</th>
+                <th scope="col" className="px-4 py-3">Trend</th>
               </tr>
             </thead>
             <tbody>
@@ -66,6 +84,9 @@ export default async function WalletsPage() {
                       ) : (
                         "—"
                       )}
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <TrendCell trend={w.data.trend} />
                     </td>
                   </tr>
                 );
