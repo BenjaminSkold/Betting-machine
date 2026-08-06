@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { getMatches } from "@/lib/data";
 import { listCollectionGroup } from "@/lib/firestore";
 import type { Competition } from "@/lib/types";
@@ -17,14 +18,15 @@ type TradeRow = {
   timestamp: number;
 };
 
-const ROW_CAP = 500;
+const PAGE_SIZE = 100;
 
 export default async function TradesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ wallet?: string; competition?: string; outcome?: string }>;
+  searchParams: Promise<{ wallet?: string; competition?: string; outcome?: string; page?: string }>;
 }) {
   const params = await searchParams;
+  const page = Math.max(1, Number(params.page) || 1);
 
   // One collection-group query fetches every match's tradeBatches in a
   // bounded number of requests, instead of one round-trip per match — N
@@ -58,9 +60,21 @@ export default async function TradesPage({
   }
   rows.sort((a, b) => b.timestamp - a.timestamp);
   const total = rows.length;
-  const shown = rows.slice(0, ROW_CAP);
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const currentPage = Math.min(page, totalPages);
+  const shown = rows.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
 
   const competitions: Competition[] = ["EPL", "UCL", "UEL", "UECL"];
+
+  // Preserves the active filters when moving between pages.
+  function pageHref(targetPage: number) {
+    const qs = new URLSearchParams();
+    if (params.wallet) qs.set("wallet", params.wallet);
+    if (params.competition) qs.set("competition", params.competition);
+    if (params.outcome) qs.set("outcome", params.outcome);
+    qs.set("page", String(targetPage));
+    return `/trades?${qs.toString()}`;
+  }
 
   return (
     <div className="max-w-5xl">
@@ -105,8 +119,13 @@ export default async function TradesPage({
         </button>
       </form>
 
-      <div className="mb-3 text-xs text-[var(--text-muted)]">
-        {total === 0 ? "No trades match these filters." : `Showing ${shown.length.toLocaleString()} of ${total.toLocaleString()} trade(s)${total > ROW_CAP ? " (capped — narrow the filters to see more)" : ""}.`}
+      <div className="mb-3 flex items-center justify-between text-xs text-[var(--text-muted)]">
+        <span>
+          {total === 0
+            ? "No trades match these filters."
+            : `Showing ${((currentPage - 1) * PAGE_SIZE + 1).toLocaleString()}–${Math.min(currentPage * PAGE_SIZE, total).toLocaleString()} of ${total.toLocaleString()} trade(s).`}
+        </span>
+        {totalPages > 1 && <span>Page {currentPage} of {totalPages}</span>}
       </div>
 
       {shown.length > 0 && (
@@ -140,6 +159,28 @@ export default async function TradesPage({
             </tbody>
           </table>
         </div>
+      )}
+
+      {totalPages > 1 && (
+        <nav className="mt-4 flex items-center justify-center gap-2" aria-label="Trades pagination">
+          <Link
+            href={pageHref(currentPage - 1)}
+            aria-disabled={currentPage <= 1}
+            className="rounded-md border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--text-secondary)] aria-disabled:pointer-events-none aria-disabled:opacity-40 hover:text-[var(--text-primary)]"
+          >
+            ← Prev
+          </Link>
+          <span className="text-sm text-[var(--text-secondary)]">
+            {currentPage} / {totalPages}
+          </span>
+          <Link
+            href={pageHref(currentPage + 1)}
+            aria-disabled={currentPage >= totalPages}
+            className="rounded-md border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--text-secondary)] aria-disabled:pointer-events-none aria-disabled:opacity-40 hover:text-[var(--text-primary)]"
+          >
+            Next →
+          </Link>
+        </nav>
       )}
     </div>
   );
