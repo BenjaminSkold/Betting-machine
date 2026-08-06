@@ -93,7 +93,14 @@ export function computeMatchScore(trades, walletsByAddress, marketPrices, market
 
     const marketPrice = marketPrices[leg];
     const shift = MAX_SHIFT * (normalizedSignal / MAX_SKILL_WEIGHT);
-    const rawEstimate = marketPrice === null || marketPrice === undefined ? null : clip(marketPrice + shift, 0.01, 0.99);
+    // With zero signal (shift === 0), pass the market price through
+    // unclipped. Clipping unconditionally to [0.01, 0.99] used to move a
+    // lopsided-but-legitimate market price (e.g. 0.995 on a near-certain
+    // favorite) even with no watchlisted activity at all, manufacturing a
+    // nonzero "edge" purely from the clip bounds — found by an independent
+    // code review. A system with no signal must report no edge.
+    const rawEstimate =
+      marketPrice === null || marketPrice === undefined ? null : shift === 0 ? marketPrice : clip(marketPrice + shift, 0.01, 0.99);
 
     breakdown[leg] = {
       score: normalizedSignal,

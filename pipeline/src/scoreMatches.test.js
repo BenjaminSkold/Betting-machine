@@ -51,6 +51,17 @@ const noSignal = computeMatchScore([], walletsByAddress, marketPrices, marketCon
 check("no-signal home probEstimate equals market price", noSignal.breakdown.home.probabilityEstimate, 0.5);
 check("no-signal home edge is ~0", noSignal.breakdown.home.edge, 0);
 
+// --- Regression: a lopsided-but-legitimate market price (a near-certain
+// favorite) with ZERO watchlisted signal must not manufacture a phantom
+// edge from the [0.01, 0.99] clip bounds. Found by an independent code
+// review: the old code clipped marketPrice+shift unconditionally, even
+// when shift was exactly 0, so 0.995 got forced down to 0.99 with no
+// signal at all, producing a nonzero edge out of thin air.
+const lopsidedPrices = { home: 0.995, draw: 0.003, away: 0.002 };
+const noSignalLopsided = computeMatchScore([], walletsByAddress, lopsidedPrices, marketConditionIds);
+check("no signal + lopsided price: probEstimate equals raw market price (not clipped)", noSignalLopsided.breakdown.home.probabilityEstimate, 0.995);
+check("no signal + lopsided price: edge is exactly 0, not a clip artifact", noSignalLopsided.breakdown.home.edge, 0);
+
 // --- Directionality: SELL Yes should count as betting AGAINST that leg.
 const sellTrades = [{ wallet: "W1", side: "SELL", outcome: "Yes", size: 100, conditionId: "H", timestamp: 0 }];
 const sellResult = computeMatchScore(sellTrades, walletsByAddress, marketPrices, marketConditionIds);
