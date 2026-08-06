@@ -1,9 +1,16 @@
 import StatTile from "@/components/StatTile";
-import { getPaperBets } from "@/lib/data";
+import { getMatches, getPaperBets } from "@/lib/data";
 import { MIN_SETTLED_BETS_TO_TRUST } from "@/lib/types";
+import { edgeBucketLabel, segmentStats, sortByBucketOrder, type Segment } from "@/lib/breakdown";
+
+function pct(x: number | null): string {
+  return x !== null ? `${(x * 100).toFixed(1)}%` : "—";
+}
 
 export default async function PerformancePage() {
-  const bets = await getPaperBets();
+  const [bets, matches] = await Promise.all([getPaperBets(), getMatches()]);
+  const competitionByMatch = new Map(matches.map((m) => [m.id, m.data.competition]));
+
   const pending = bets.filter((b) => b.data.outcome === "pending");
   const voided = bets.filter((b) => b.data.outcome === "void");
   // "Decided" excludes void (postponed/voided match, stake refunded) from
@@ -20,6 +27,19 @@ export default async function PerformancePage() {
   const roi = totalStaked > 0 ? bankroll / totalStaked : null;
 
   const trustworthy = decided.length >= MIN_SETTLED_BETS_TO_TRUST;
+
+  const byCompetition = segmentStats(
+    decided,
+    (b) => competitionByMatch.get(b.data.matchId) ?? "Unknown",
+    (b) => b.data
+  );
+  const byEdgeBucket = sortByBucketOrder(
+    segmentStats(
+      decided,
+      (b) => edgeBucketLabel(b.data.edgeAtBet),
+      (b) => b.data
+    )
+  );
 
   return (
     <div className="max-w-4xl">
@@ -48,6 +68,20 @@ export default async function PerformancePage() {
         <StatTile label="ROI" value={roi !== null ? `${(roi * 100).toFixed(1)}%` : "—"} deltaGood={roi !== null ? roi >= 0 : undefined} delta={roi !== null ? (roi >= 0 ? "profitable" : "down") : undefined} />
         <StatTile label="Pending / voided" value={`${pending.length} / ${voided.length}`} />
       </div>
+
+      {decided.length > 0 && (
+        <div className="mt-8">
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-[var(--text-muted)]">Breakdown</h2>
+          <p className="mb-3 text-xs text-[var(--text-secondary)]">
+            Same &quot;decided&quot; denominator as the numbers above — segments can&apos;t look better than the headline by quietly
+            counting pending or voided bets.
+          </p>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <SegmentTable title="By competition" segments={byCompetition} />
+            <SegmentTable title="By edge at bet" segments={byEdgeBucket} />
+          </div>
+        </div>
+      )}
 
       <div className="mt-8 mb-3 flex items-center justify-between">
         <h2 className="text-sm font-semibold uppercase tracking-wide text-[var(--text-muted)]">Bet log</h2>
@@ -98,6 +132,41 @@ export default async function PerformancePage() {
           </table>
         </div>
       )}
+    </div>
+  );
+}
+
+function SegmentTable({ title, segments }: { title: string; segments: Segment[] }) {
+  return (
+    <div>
+      <div className="mb-2 text-xs font-medium text-[var(--text-secondary)]">{title}</div>
+      <div className="overflow-x-auto rounded-lg border border-[var(--border)] bg-[var(--surface-1)]">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-[var(--border)] text-left text-xs uppercase tracking-wide text-[var(--text-muted)]">
+              <th scope="col" className="px-3 py-2">Segment</th>
+              <th scope="col" className="tabular px-3 py-2 text-right">Bets</th>
+              <th scope="col" className="tabular px-3 py-2 text-right">Win rate</th>
+              <th scope="col" className="tabular px-3 py-2 text-right">ROI</th>
+            </tr>
+          </thead>
+          <tbody>
+            {segments.map((s) => (
+              <tr key={s.key} className="border-b border-[var(--border)] last:border-0">
+                <td className="px-3 py-2 text-[var(--text-primary)]">{s.key}</td>
+                <td className="tabular px-3 py-2 text-right text-[var(--text-secondary)]">{s.count}</td>
+                <td className="tabular px-3 py-2 text-right text-[var(--text-primary)]">{pct(s.winRate)}</td>
+                <td
+                  className="tabular px-3 py-2 text-right font-medium"
+                  style={{ color: s.roi === null ? "var(--text-muted)" : s.roi >= 0 ? "var(--status-good-text)" : "var(--status-critical)" }}
+                >
+                  {pct(s.roi)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

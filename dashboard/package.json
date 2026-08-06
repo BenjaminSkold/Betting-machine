@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node src/lib/validate.test.ts"
+    "test": "node src/lib/validate.test.ts && node src/lib/csv.test.ts && node src/lib/breakdown.test.ts"
   },
   "dependencies": {
     "google-auth-library": "^11.0.0",
