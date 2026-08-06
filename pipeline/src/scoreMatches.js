@@ -6,6 +6,7 @@
 // full, documented formula. Read PROJECT.md's "Why edge, not just
 // confidence" and "Timing snapshots" sections before changing this.
 import { getDb } from "./firestoreRest.js";
+import { isMainModule } from "./isMain.js";
 
 const CHECKPOINTS_MIN = [60, 15, 10];
 
@@ -207,7 +208,7 @@ async function main() {
   console.log(`\nDone. ${scored} new confluence score(s) written.`);
 }
 
-if (import.meta.main) {
+if (isMainModule(import.meta.url)) {
   main().catch((err) => {
     console.error("Scoring FAILED:", err);
     process.exit(1);

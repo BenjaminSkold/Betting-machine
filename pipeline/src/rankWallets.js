@@ -6,6 +6,7 @@
 // tuned constants.
 import { getDb } from "./firestoreRest.js";
 import { chunk } from "./tradeBatches.js";
+import { isMainModule } from "./isMain.js";
 
 const FIRESTORE_BATCH_LIMIT = 500;
 
@@ -193,7 +194,7 @@ async function main() {
 
 export { shrink, pnlAndStake, legFor, buildTradeRows, summarize, sliceBy, MIN_TRADES, SHRINKAGE_K };
 
-if (import.meta.main) {
+if (isMainModule(import.meta.url)) {
   main().catch((err) => {
     console.error("Wallet ranking FAILED:", err);
     process.exit(1);

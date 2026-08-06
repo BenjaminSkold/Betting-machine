@@ -1,6 +1,7 @@
 import { getDb } from "./firestoreRest.js";
 import { findLiveMatches, getAllTrades, tradeKey } from "./polymarket.js";
 import { chunk, toStoredTrade } from "./tradeBatches.js";
+import { isMainModule } from "./isMain.js";
 
 const COMPETITIONS = ["EPL", "UCL", "UEL"];
 const CHECKPOINTS_MIN = [60, 15, 10];
@@ -205,7 +206,7 @@ async function main() {
 
 export { planSnapshots, planNewTrades, CHECKPOINTS_MIN, CHECKPOINT_TOLERANCE_MIN };
 
-if (import.meta.main) {
+if (isMainModule(import.meta.url)) {
   main().catch((err) => {
     console.error("Collection run FAILED:", err);
     process.exit(1);

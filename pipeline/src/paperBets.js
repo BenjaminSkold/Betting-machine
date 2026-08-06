@@ -4,6 +4,7 @@
 // edge clears a threshold, then settle any pending bet whose match has
 // since resolved.
 import { getDb } from "./firestoreRest.js";
+import { isMainModule } from "./isMain.js";
 
 // "A meaningful positive edge" and "flat stake" per Milestone 5's prompt —
 // both explicitly meant to be configurable, not fitted constants.
@@ -108,7 +109,7 @@ async function main() {
   console.log(`${settled} bet(s) settled.`);
 }
 
-if (import.meta.main) {
+if (isMainModule(import.meta.url)) {
   main().catch((err) => {
     console.error("Paper-bet run FAILED:", err);
     process.exit(1);
