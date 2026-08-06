@@ -1,12 +1,11 @@
-import { getDb } from "./firestoreRest.js";
+import { getPool } from "./db.js";
 
 async function main() {
-  const db = getDb();
-  const ref = db.collection("_diagnostics").doc("connectionCheck");
-  await ref.set({ checkedAt: new Date().toISOString() });
-  const snap = await ref.get();
-  console.log("Wrote and read back:", snap.data());
-  console.log("Firestore connection OK.");
+  const pool = getPool();
+  const { rows } = await pool.query("SELECT now() AS now");
+  console.log("Connected. Server time:", rows[0].now);
+  console.log("Supabase connection OK.");
+  await pool.end();
 }
 
 main().catch((err) => {

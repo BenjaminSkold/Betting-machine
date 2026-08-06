@@ -1,18 +1,6 @@
 // Throwaway synthetic check for rankWallets.js's compute logic — hand-worked
 // expected numbers, run before trusting it against real Firestore data.
-import {
-  shrink,
-  pnlAndStake,
-  legFor,
-  buildTradeRows,
-  summarize,
-  monthKey,
-  computeTrend,
-  classifyMarketsFromEvent,
-  resultFromMarkets,
-  MIN_TRADES,
-  SHRINKAGE_K,
-} from "./rankWallets.js";
+import { shrink, pnlAndStake, legFor, buildTradeRows, summarize, monthKey, computeTrend, MIN_TRADES, SHRINKAGE_K } from "./rankWallets.js";
 
 let failures = 0;
 function check(label, actual, expected, tolerance = 1e-9) {
@@ -123,34 +111,6 @@ const thin = computeTrend(thinRows, 0.5);
 check("thin sample: label is insufficient data", thin.label, "insufficient data");
 check("thin sample: delta is null, not a misleading number", thin.delta, null);
 check("thin sample: still flags which half was thin", thin.early.usedFallback, true);
-
-// --- classifyMarketsFromEvent / resultFromMarkets (the read-quota-bypass
-// path's Polymarket-event parsing, mirrored from backfill.js/collect.js) ---
-const fakeEvent = {
-  title: "Arsenal vs. Chelsea",
-  markets: [
-    { question: "Will Arsenal win on 2026-03-01?", outcomePrices: "[0.02, 0.98]" },
-    { question: "Will the match end in a draw?", outcomePrices: "[0.01, 0.99]" },
-    { question: "Will Chelsea win on 2026-03-01?", outcomePrices: "[0.97, 0.03]" },
-  ],
-};
-const classified = classifyMarketsFromEvent(fakeEvent);
-check("classifyMarketsFromEvent: home team parsed from title", classified.homeTeam, "Arsenal");
-check("classifyMarketsFromEvent: away team parsed from title", classified.awayTeam, "Chelsea");
-check("classifyMarketsFromEvent: home market matched by team name prefix", classified.home?.outcomePrices, "[0.02, 0.98]");
-check("classifyMarketsFromEvent: draw market matched by 'end in a draw'", classified.draw?.outcomePrices, "[0.01, 0.99]");
-check("classifyMarketsFromEvent: away market matched by team name prefix", classified.away?.outcomePrices, "[0.97, 0.03]");
-
-check(
-  "resultFromMarkets: away leg's Yes price > 0.9 -> away won",
-  resultFromMarkets(classified.home, classified.draw, classified.away),
-  "away"
-);
-check(
-  "resultFromMarkets: no leg above 0.9 -> undetermined (postponed/voided)",
-  resultFromMarkets({ outcomePrices: "[0.4,0.6]" }, { outcomePrices: "[0.3,0.7]" }, { outcomePrices: "[0.3,0.7]" }),
-  null
-);
 
 console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) FAILED.`);
 process.exit(failures === 0 ? 0 : 1);

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Polymarket data collection + backfill jobs for the Confluence project. Writes into Firestore. Run via GitHub Actions cron.",
+  "description": "Polymarket data collection + backfill jobs for the Confluence project. Writes into Supabase (Postgres). Run via GitHub Actions cron.",
   "scripts": {
     "check-connection": "node src/checkConnection.js",
     "collect": "node src/collect.js",
@@ -14,6 +14,7 @@
     "test": "node src/polymarket.test.js && node src/collect.test.js && node src/rankWallets.test.js && node src/scoreMatches.test.js && node src/paperBets.test.js"
   },
   "dependencies": {
-    "google-auth-library": "^10.9.1"
+    "dotenv": "^16.4.5",
+    "pg": "^8.13.1"
   }
 }

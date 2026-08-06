@@ -1,7 +1,6 @@
 import Link from "next/link";
-import { getMatches, getSystemStatus } from "@/lib/data";
+import { getAllConfluenceScores, getMatches, getSystemStatus } from "@/lib/data";
 import type { Competition, ConfluenceScore } from "@/lib/types";
-import { listCollection } from "@/lib/firestore";
 import { freshnessAge } from "@/lib/time";
 
 function formatKickoff(iso: string): string {
@@ -18,11 +17,7 @@ const COMPETITIONS: Competition[] = ["EPL", "UCL", "UEL", "UECL"];
 
 export default async function MatchesPage({ searchParams }: { searchParams: Promise<{ competition?: string; q?: string }> }) {
   const params = await searchParams;
-  const [allMatches, scores, status] = await Promise.all([
-    getMatches(),
-    listCollection<ConfluenceScore>("confluenceScores"),
-    getSystemStatus(),
-  ]);
+  const [allMatches, scores, status] = await Promise.all([getMatches(), getAllConfluenceScores(), getSystemStatus()]);
 
   const q = params.q?.toLowerCase().trim();
   const matches = allMatches.filter((m) => {

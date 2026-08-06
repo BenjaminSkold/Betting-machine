@@ -1,6 +1,5 @@
-import { getDb } from "./firestoreRest.js";
+import { getPool, withTransaction, getMatchRow, upsertMatch, getExistingSnapshotCheckpoints, insertSnapshot, insertTrades } from "./db.js";
 import { findResolvedMatches, getAllTrades, getPriceHistory, clobTokenIdsFor } from "./polymarket.js";
-import { chunk, toStoredTrade } from "./tradeBatches.js";
 
 const COMPETITIONS = ["EPL", "UCL", "UEL"];
 const CHECKPOINTS_MIN = [60, 15, 10];
@@ -61,12 +60,8 @@ async function nearestPriceAt(tokenId, kickoffTime, minutesBefore) {
 }
 
 // Figures out which checkpoint snapshots are missing and what they should
-// contain, without writing anything yet — the actual write is folded into
-// the single combined batch commit in processMatch, to keep write-request
-// count to one per match regardless of how many checkpoints/trade-chunks
-// there are (this project's real write-rate ceiling turned out to be the
-// binding constraint, not raw compute time).
-async function planSnapshots(matchRef, home, draw, away, kickoffTime) {
+// contain, given the checkpoints already stored for this match.
+async function planSnapshots(existingCheckpoints, home, draw, away, kickoffTime) {
   const tokens = {
     home: clobTokenIdsFor(home)[0],
     draw: clobTokenIdsFor(draw)[0],
@@ -74,9 +69,7 @@ async function planSnapshots(matchRef, home, draw, away, kickoffTime) {
   };
   const plan = [];
   for (const checkpoint of CHECKPOINTS_MIN) {
-    const snapRef = matchRef.collection("snapshots").doc(`checkpoint_${checkpoint}`);
-    const existing = await snapRef.get();
-    if (existing.exists) continue;
+    if (existingCheckpoints.has(String(checkpoint))) continue;
 
     const [homeP, drawP, awayP] = await Promise.all([
       nearestPriceAt(tokens.home, kickoffTime, checkpoint),
@@ -86,7 +79,7 @@ async function planSnapshots(matchRef, home, draw, away, kickoffTime) {
     if (homeP === null && drawP === null && awayP === null) continue;
 
     plan.push({
-      ref: snapRef,
+      checkpoint,
       data: {
         capturedAt: null, // backfilled — there was no live "capture" moment
         minutesBeforeKickoff: checkpoint,
@@ -108,66 +101,55 @@ async function fetchAllTrades(markets) {
   return allTrades;
 }
 
-async function processMatch(db, competition, event) {
+async function processMatch(pool, competition, event) {
   const { homeTeam, awayTeam, home, draw, away } = classifyMarkets(event);
   if (!home || !draw || !away) {
     console.log(`  SKIP "${event.title}" — could not classify all 3 markets`);
     return;
   }
 
-  const matchRef = db.collection("matches").doc(String(event.id));
-  const existing = await matchRef.get();
-  // marketConditionIds was added after some matches were already backfilled
-  // — require it too so those older docs get naturally healed on resume
+  const eventId = String(event.id);
+  const existing = await getMatchRow(pool, eventId);
+  // home_condition_id was added after some matches were already backfilled
+  // — require it too so those older rows get naturally healed on resume
   // instead of staying permanently missing the field.
-  if (existing.exists && existing.data().tradesBackfilled && existing.data().marketConditionIds) {
+  if (existing && existing.trades_backfilled && existing.home_condition_id) {
     console.log(`  SKIP "${event.title}" — already backfilled (resumed run)`);
     return;
   }
 
   const kickoffTime = kickoffTimeOf(home, event);
   const result = resultFrom(home, draw, away);
-  const snapshotPlan = await planSnapshots(matchRef, home, draw, away, kickoffTime);
+  const existingCheckpoints = existing ? await getExistingSnapshotCheckpoints(pool, eventId) : new Set();
+  const snapshotPlan = await planSnapshots(existingCheckpoints, home, draw, away, kickoffTime);
   const trades = await fetchAllTrades([home, draw, away]);
 
-  // Everything for this match lands in one atomic commit — one write
-  // request no matter how many snapshots/trade-chunks it contains.
-  const batch = db.batch();
-  batch.set(
-    matchRef,
-    {
+  await withTransaction(pool, async (client) => {
+    await upsertMatch(client, eventId, {
       competition,
-      homeTeam,
-      awayTeam,
-      kickoffTime: kickoffTime.toISOString(),
-      polymarketMarketId: String(event.id),
+      home_team: homeTeam,
+      away_team: awayTeam,
+      kickoff_time: kickoffTime.toISOString(),
+      polymarket_market_id: eventId,
       resolved: true,
       result,
-      tradesBackfilled: true,
+      trades_backfilled: true,
       // Lets the wallet-ranking job join a trade's conditionId back to
       // which leg (home/draw/away) it was betting on, and combined with
       // `result`, whether that trade's side actually won.
-      marketConditionIds: { home: home.conditionId, draw: draw.conditionId, away: away.conditionId },
-    },
-    { merge: true }
-  );
-  for (const { ref, data } of snapshotPlan) batch.set(ref, data);
-  let batchIndex = 0;
-  for (const group of chunk(trades)) {
-    batch.set(matchRef.collection("tradeBatches").doc(`batch_${batchIndex}`), {
-      trades: group.map(toStoredTrade),
-      count: group.length,
-      writtenAt: new Date().toISOString(),
+      home_condition_id: home.conditionId,
+      draw_condition_id: draw.conditionId,
+      away_condition_id: away.conditionId,
     });
-    batchIndex++;
-  }
-  await batch.commit();
+    for (const { checkpoint, data } of snapshotPlan) await insertSnapshot(client, eventId, checkpoint, data);
+    await insertTrades(client, eventId, trades);
+  });
 
   console.log(`  ${event.title}: result=${result ?? "unknown"} snapshots=${snapshotPlan.length} trades=${trades.length}`);
 }
 
 async function main() {
-  const db = getDb();
+  const pool = getPool();
   let total = 0;
   const permanentlyFailed = [];
 
@@ -176,9 +158,6 @@ async function main() {
     const toProcess = matches.slice(0, LIMIT);
     console.log(`\n[${competition}] ${matches.length} resolved match(es) found, processing ${toProcess.length}`);
     for (const event of toProcess) {
-      // This project's real write-rate ceiling is well under what a fresh,
-      // unbilled Firestore project's documented quotas would suggest —
-      // plausibly a provisional throttle that eases as the project ages.
       // Treat failures as recoverable: cool down and retry a few times
       // before giving up on this one match and moving on (it'll be picked
       // up on the next run, since already-done matches are skipped).
@@ -186,7 +165,7 @@ async function main() {
       const maxAttempts = 4;
       while (true) {
         try {
-          await processMatch(db, competition, event);
+          await processMatch(pool, competition, event);
           total++;
           break;
         } catch (err) {
@@ -195,7 +174,7 @@ async function main() {
             permanentlyFailed.push(event.title);
             break;
           }
-          const cooldownMs = 30_000 * attempt; // 30s, 60s, 90s
+          const cooldownMs = 5_000 * attempt; // 5s, 10s, 15s — Postgres has no comparable quota-recovery wait to Firestore's
           console.log(`    cooling down ${cooldownMs / 1000}s before retry...`);
           await new Promise((resolve) => setTimeout(resolve, cooldownMs));
           attempt++;
@@ -209,6 +188,7 @@ async function main() {
     console.log(`${permanentlyFailed.length} match(es) failed after 4 attempts each — rerun the script to retry them:`);
     for (const title of permanentlyFailed) console.log(`  - ${title}`);
   }
+  await pool.end();
 }
 
 main().catch((err) => {

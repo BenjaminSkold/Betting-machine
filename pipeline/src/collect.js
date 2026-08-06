@@ -1,6 +1,5 @@
-import { getDb } from "./firestoreRest.js";
+import { getPool, withTransaction, getMatchRow, upsertMatch, getExistingSnapshotCheckpoints, insertSnapshot, insertTrades } from "./db.js";
 import { findLiveMatches, getAllTrades, tradeKey } from "./polymarket.js";
-import { chunk, toStoredTrade } from "./tradeBatches.js";
 import { isMainModule } from "./isMain.js";
 
 const COMPETITIONS = ["EPL", "UCL", "UEL"];
@@ -49,9 +48,10 @@ function kickoffTimeOf(market, event) {
   return new Date(event.endDate);
 }
 
-// Figures out which checkpoint snapshot(s) are due without writing them —
-// the actual write is folded into the single combined batch commit in
-// processMatch, to keep write-request count to one per match per run.
+// Figures out which checkpoint snapshot(s) are due, given the checkpoints
+// already stored for this match. Postgres has no per-doc existence-check
+// cost the way Firestore did, so the caller just queries once for the whole
+// match and passes the resulting Set in — no per-checkpoint round trip.
 //
 // Returns every due-and-missing checkpoint, not just the first: the
 // checkpoints' tolerance windows overlap (15±5=[10,20] and 10±5=[5,15]
@@ -59,16 +59,14 @@ function kickoffTimeOf(market, event) {
 // write both — an early `return` on the first match would silently lose
 // checkpoint 10 for any match whose kickoff aligns with the 15-min cron
 // grid, which is common. See NOTES.md.
-async function planSnapshots(matchRef, home, draw, away, kickoffTime) {
+function planSnapshots(existingCheckpoints, home, draw, away, kickoffTime) {
   const minutesToKickoff = (kickoffTime.getTime() - Date.now()) / 60000;
   const due = [];
   for (const checkpoint of CHECKPOINTS_MIN) {
     if (Math.abs(minutesToKickoff - checkpoint) > CHECKPOINT_TOLERANCE_MIN) continue;
-    const snapRef = matchRef.collection("snapshots").doc(`checkpoint_${checkpoint}`);
-    const existing = await snapRef.get();
-    if (existing.exists) continue;
+    if (existingCheckpoints.has(String(checkpoint))) continue;
     due.push({
-      ref: snapRef,
+      checkpoint,
       data: {
         capturedAt: new Date().toISOString(),
         minutesBeforeKickoff: checkpoint,
@@ -81,9 +79,9 @@ async function planSnapshots(matchRef, home, draw, away, kickoffTime) {
 }
 
 // Only fetches trades newer than what we've already stored per market
-// (cursor kept on the match doc), so a match with thousands of historical
-// trades doesn't get rewritten in full on every 15-min run — only genuinely
-// new trades cost anything.
+// (cursor kept on the match row), so a match with thousands of historical
+// trades doesn't get re-fetched in full on every 15-min run — only
+// genuinely new trades cost anything against Polymarket's API.
 async function planNewTrades(markets, cursor, fetchTrades = getAllTrades) {
   const lastSeenTimestamp = { ...(cursor.lastSeenTimestamp || {}) };
   // Trades sharing the cursor's exact max timestamp from the previous run —
@@ -116,7 +114,7 @@ async function planNewTrades(markets, cursor, fetchTrades = getAllTrades) {
   return { newTrades, lastSeenTimestamp, lastSeenKeysAtCursor };
 }
 
-async function processMatch(db, competition, event) {
+async function processMatch(pool, competition, event) {
   const { homeTeam, awayTeam, home, draw, away } = classifyMarkets(event);
   if (!home || !draw || !away) {
     console.log(`  SKIP "${event.title}" — could not classify all 3 markets`);
@@ -124,58 +122,53 @@ async function processMatch(db, competition, event) {
   }
 
   const kickoffTime = kickoffTimeOf(home, event);
-  const matchRef = db.collection("matches").doc(String(event.id));
-  const existing = await matchRef.get();
-  const cursor = existing.exists ? existing.data() : {};
+  const eventId = String(event.id);
+  const existing = await getMatchRow(pool, eventId);
+  const cursor = existing
+    ? { lastSeenTimestamp: existing.last_seen_timestamp || {}, lastSeenKeysAtCursor: existing.last_seen_keys_at_cursor || {} }
+    : {};
+  const existingCheckpoints = existing ? await getExistingSnapshotCheckpoints(pool, eventId) : new Set();
 
-  const snapshots = await planSnapshots(matchRef, home, draw, away, kickoffTime);
+  const snapshots = planSnapshots(existingCheckpoints, home, draw, away, kickoffTime);
   const { newTrades, lastSeenTimestamp, lastSeenKeysAtCursor } = await planNewTrades([home, draw, away], cursor);
 
-  // Everything for this match lands in one atomic commit — one write
-  // request per match per run, regardless of how much changed.
   // All three legs are negRisk-linked and expected to close together, but
   // check all three rather than assume home's flag speaks for the others.
   const resolved = Boolean(home.closed && draw.closed && away.closed);
-  const batch = db.batch();
-  batch.set(
-    matchRef,
-    {
+
+  await withTransaction(pool, async (client) => {
+    await upsertMatch(client, eventId, {
       competition,
-      homeTeam,
-      awayTeam,
-      kickoffTime: kickoffTime.toISOString(),
-      polymarketMarketId: String(event.id),
+      home_team: homeTeam,
+      away_team: awayTeam,
+      kickoff_time: kickoffTime.toISOString(),
+      polymarket_market_id: eventId,
       resolved,
       result: resolved ? resultFrom(home, draw, away) : null,
-      marketConditionIds: { home: home.conditionId, draw: draw.conditionId, away: away.conditionId },
-    },
-    { merge: true }
-  );
-
-  for (const snapshot of snapshots) {
-    batch.set(snapshot.ref, snapshot.data);
-    console.log(`    snapshot @ ${snapshot.data.minutesBeforeKickoff}min written`);
-  }
-
-  let nextBatchIndex = cursor.nextBatchIndex || 0;
-  for (const group of chunk(newTrades)) {
-    batch.set(matchRef.collection("tradeBatches").doc(`batch_${nextBatchIndex}`), {
-      trades: group.map(toStoredTrade),
-      count: group.length,
-      writtenAt: new Date().toISOString(),
+      home_condition_id: home.conditionId,
+      draw_condition_id: draw.conditionId,
+      away_condition_id: away.conditionId,
+      ...(newTrades.length > 0
+        ? {
+            last_seen_timestamp: JSON.stringify(lastSeenTimestamp),
+            last_seen_keys_at_cursor: JSON.stringify(lastSeenKeysAtCursor),
+          }
+        : {}),
     });
-    nextBatchIndex++;
-  }
-  if (newTrades.length > 0) {
-    batch.update(matchRef, { lastSeenTimestamp, lastSeenKeysAtCursor, nextBatchIndex });
-  }
 
-  await batch.commit();
+    for (const snapshot of snapshots) {
+      await insertSnapshot(client, eventId, snapshot.checkpoint, snapshot.data);
+      console.log(`    snapshot @ ${snapshot.data.minutesBeforeKickoff}min written`);
+    }
+
+    await insertTrades(client, eventId, newTrades);
+  });
+
   console.log(`  ${event.title}: ${newTrades.length} new trade(s)`);
 }
 
 async function main() {
-  const db = getDb();
+  const pool = getPool();
   let totalMatches = 0;
   let failedMatches = 0;
 
@@ -184,24 +177,29 @@ async function main() {
     console.log(`[${competition}] ${matches.length} live match(es)`);
     for (const event of matches) {
       try {
-        await processMatch(db, competition, event);
+        await processMatch(pool, competition, event);
         totalMatches++;
       } catch (err) {
         // Cron runs every 15 min, which is itself a natural retry — better
-        // to skip one throttled/flaky match than abort the whole run and
-        // lose every other match's snapshot/trade update for this cycle.
+        // to skip one flaky match than abort the whole run and lose every
+        // other match's snapshot/trade update for this cycle.
         failedMatches++;
         console.log(`  ERROR on "${event.title}", skipping this run: ${err.message}`);
       }
     }
   }
 
-  await db.collection("_system").doc("status").set({
-    lastSuccessfulRun: new Date().toISOString(),
-    matchesProcessed: totalMatches,
-    matchesFailed: failedMatches,
-  });
+  await pool.query(
+    `INSERT INTO pipeline_status (key, last_successful_run, matches_processed, matches_failed)
+     VALUES ('status', now(), $1, $2)
+     ON CONFLICT (key) DO UPDATE SET
+       last_successful_run = EXCLUDED.last_successful_run,
+       matches_processed = EXCLUDED.matches_processed,
+       matches_failed = EXCLUDED.matches_failed`,
+    [totalMatches, failedMatches]
+  );
   console.log(`\nDone. ${totalMatches} match(es) processed, ${failedMatches} failed. lastSuccessfulRun updated.`);
+  await pool.end();
 }
 
 export { planSnapshots, planNewTrades, CHECKPOINTS_MIN, CHECKPOINT_TOLERANCE_MIN };

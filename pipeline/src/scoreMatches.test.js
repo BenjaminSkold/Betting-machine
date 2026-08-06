@@ -1,6 +1,6 @@
 // Throwaway synthetic check for scoreMatches.js's compute logic — hand-worked
 // expected numbers, run before trusting it against real Firestore data.
-import { computeMatchScore, classifyMarketsFromEvent, kickoffTimeFromMarket } from "./scoreMatches.js";
+import { computeMatchScore } from "./scoreMatches.js";
 
 let failures = 0;
 function check(label, actual, expected, tolerance = 1e-6) {
@@ -66,35 +66,6 @@ check("no signal + lopsided price: edge is exactly 0, not a clip artifact", noSi
 const sellTrades = [{ wallet: "W1", side: "SELL", outcome: "Yes", size: 100, conditionId: "H", timestamp: 0 }];
 const sellResult = computeMatchScore(sellTrades, walletsByAddress, marketPrices, marketConditionIds);
 check("SELL Yes produces a negative home signal", sellResult.breakdown.home.score < 0, true);
-
-// --- classifyMarketsFromEvent / kickoffTimeFromMarket (the read-quota-
-// bypass path's Polymarket-event parsing, mirrored from
-// backfill.js/collect.js/rankWallets.js) ---
-const fakeEvent = {
-  title: "Liverpool vs. Everton",
-  endDate: "2026-05-01T14:00:00.000Z",
-  markets: [
-    { question: "Will Liverpool win on 2026-05-01?", gameStartTime: "2026-05-01 13:00:00+00" },
-    { question: "Will the match end in a draw?" },
-    { question: "Will Everton win on 2026-05-01?" },
-  ],
-};
-const classified = classifyMarketsFromEvent(fakeEvent);
-check("classifyMarketsFromEvent: home team from title", classified.homeTeam, "Liverpool");
-check("classifyMarketsFromEvent: away team from title", classified.awayTeam, "Everton");
-check("classifyMarketsFromEvent: home matched by team-name prefix", classified.home?.question, "Will Liverpool win on 2026-05-01?");
-check("classifyMarketsFromEvent: away matched by team-name prefix", classified.away?.question, "Will Everton win on 2026-05-01?");
-
-check(
-  "kickoffTimeFromMarket: parses gameStartTime, fixing the missing ':00' UTC offset",
-  kickoffTimeFromMarket(classified.home, fakeEvent).toISOString(),
-  "2026-05-01T13:00:00.000Z"
-);
-check(
-  "kickoffTimeFromMarket: falls back to event.endDate when gameStartTime is absent",
-  kickoffTimeFromMarket({}, fakeEvent).toISOString(),
-  "2026-05-01T14:00:00.000Z"
-);
 
 console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) FAILED.`);
 process.exit(failures === 0 ? 0 : 1);

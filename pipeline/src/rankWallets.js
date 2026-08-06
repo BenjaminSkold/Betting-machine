@@ -4,39 +4,9 @@
 // before changing the thresholds below — they're deliberately simple,
 // documented guesses meant to be revisited once real data exists, not
 // tuned constants.
-import { appendFileSync, createReadStream, existsSync, readFileSync } from "node:fs";
-import { createInterface } from "node:readline";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
-import { getDb } from "./firestoreRest.js";
-import { toStoredTrade } from "./tradeBatches.js";
-import { findResolvedMatches, getAllTrades } from "./polymarket.js";
+import { getPool } from "./db.js";
 import { isMainModule } from "./isMain.js";
 
-const BACKFILL_COMPETITIONS = ["EPL", "UCL", "UEL"];
-
-// loadResolvedMatchesFromPolymarket's local resume cache — deliberately NOT
-// Firestore (that's the whole point of this bypass) and deliberately NOT in
-// $CLAUDE_JOB_DIR/tmp (that's wiped between sessions; this needs to survive
-// a crashed run). One JSON object per line, appended as each match finishes,
-// so a killed process loses at most its one in-flight match, not the whole
-// run — found necessary live, after an unretried 408 killed a run ~20
-// minutes and ~600 matches in. Delete this file to force a fully fresh
-// re-fetch (e.g. once Firestore's read quota is healthy again and this
-// bypass is no longer needed).
-const POLYMARKET_CACHE_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", ".rankwallets-polymarket-cache.jsonl");
-
-// Tracks which wallets/{id} writes have already landed, for the same reason
-// as the fetch cache above: at ~56k individual writes paced ~1.1s apart
-// (Firestore's :commit batch endpoint turned out to be throttled far more
-// strictly than plain single-document writes — even a 25-write batch 429'd
-// after full retry backoff, while an isolated .set() always succeeds — so
-// batching isn't an option here), this phase alone runs for many hours.
-// One wallet address per line, appended as each write succeeds.
-const WRITTEN_WALLETS_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", ".rankwallets-written.txt");
-
-// Found this needs to be far smaller than Firestore's own 500-write limit
-// once writing hit the current project's real (severely constrained) write
 // "Enough resolved trades to say anything meaningful" — PROJECT.md's own
 // suggested starting point. Below this, a slice/wallet falls back to a
 // coarser number instead of reporting its own (too-noisy) rate.
@@ -87,119 +57,40 @@ function legFor(trade, match) {
   return null;
 }
 
-async function loadResolvedMatchesWithTrades(db) {
-  const matchDocs = await db.collection("matches").list();
-  const matches = [];
-  for (const doc of matchDocs) {
-    const data = doc.data();
-    if (!data.resolved || !data.result || !data.marketConditionIds) continue;
-    const batches = await doc.ref.collection("tradeBatches").list();
-    const trades = batches.flatMap((b) => b.data().trades || []);
-    matches.push({ id: doc.id, ...data, trades });
+// Postgres has server-side WHERE filtering, so this is one indexed query
+// per table instead of Firestore's full-collection `list()` scans (which is
+// what used to blow the read quota and required the whole
+// straight-from-Polymarket bypass this file no longer has).
+async function loadResolvedMatchesWithTrades(pool) {
+  const { rows: matchRows } = await pool.query(
+    `SELECT event_id AS "id", competition, home_team AS "homeTeam", away_team AS "awayTeam", result,
+            home_condition_id AS "home", draw_condition_id AS "draw", away_condition_id AS "away"
+     FROM matches
+     WHERE resolved = true AND result IS NOT NULL
+       AND home_condition_id IS NOT NULL AND draw_condition_id IS NOT NULL AND away_condition_id IS NOT NULL`
+  );
+  const { rows: tradeRows } = await pool.query(
+    `SELECT t.match_id AS "matchId", t.wallet, t.side, t.size, t.price, t.timestamp, t.outcome, t.condition_id AS "conditionId"
+     FROM trades t
+     JOIN matches m ON m.event_id = t.match_id
+     WHERE m.resolved = true AND m.result IS NOT NULL`
+  );
+
+  const tradesByMatch = new Map();
+  for (const t of tradeRows) {
+    if (!tradesByMatch.has(t.matchId)) tradesByMatch.set(t.matchId, []);
+    tradesByMatch.get(t.matchId).push(t);
   }
-  return matches;
-}
 
-// A match event has 3 markets (home-win/draw/away-win), each phrased as
-// "Will {team} win on {date}?" or "... end in a draw?" — same parsing as
-// backfill.js/collect.js (duplicated rather than imported: backfill.js has
-// no import.meta.main gate, so importing it would run its whole main()).
-function classifyMarketsFromEvent(event) {
-  const [homeTeam, awayTeam] = event.title.split(" vs. ").map((s) => s.trim());
-  const found = {};
-  for (const m of event.markets) {
-    if (/end in a draw/i.test(m.question)) found.draw = m;
-    else if (m.question.startsWith(`Will ${homeTeam} `)) found.home = m;
-    else if (m.question.startsWith(`Will ${awayTeam} `)) found.away = m;
-  }
-  return { homeTeam, awayTeam, ...found };
-}
-
-function yesPriceFromMarket(market) {
-  try {
-    const prices = JSON.parse(market.outcomePrices || "[]");
-    return prices.length ? Number(prices[0]) : null;
-  } catch {
-    return null;
-  }
-}
-
-function resultFromMarkets(home, draw, away) {
-  if (yesPriceFromMarket(home) > 0.9) return "home";
-  if (yesPriceFromMarket(draw) > 0.9) return "draw";
-  if (yesPriceFromMarket(away) > 0.9) return "away";
-  return null;
-}
-
-// Rebuilds the exact same {competition, homeTeam, awayTeam, result,
-// marketConditionIds, trades} shape loadResolvedMatchesWithTrades reads back
-// out of Firestore — but straight from Polymarket instead. For when
-// Firestore's own READ quota is what's blocking us, not Polymarket's (a
-// completely separate service with unrelated rate limits) — see NOTES.md
-// for how this was found. Deliberately not the default path: re-fetching
-// everything Firestore already has is wasteful once Firestore itself is
-// healthy again, so this is opt-in via RANK_WALLETS_FROM_POLYMARKET=1.
-// Streams the cache line-by-line rather than reading the whole file into one
-// JS string — found necessary live once the cache grew past 800MB (892
-// matches, many with 10-20k+ trades each) and readFileSync threw
-// ERR_STRING_TOO_LONG (Node's ~512MB single-string ceiling). A stream has no
-// such limit regardless of file size.
-async function loadPolymarketCache() {
-  const byId = new Map();
-  if (!existsSync(POLYMARKET_CACHE_PATH)) return byId;
-  const rl = createInterface({ input: createReadStream(POLYMARKET_CACHE_PATH, { encoding: "utf8" }), crlfDelay: Infinity });
-  for await (const line of rl) {
-    if (!line) continue;
-    try {
-      const match = JSON.parse(line);
-      byId.set(match.id, match);
-    } catch {
-      // A truncated trailing line (process killed mid-write) — the match it
-      // belongs to just gets re-fetched below, same as if it were missing.
-    }
-  }
-  return byId;
-}
-
-async function loadResolvedMatchesFromPolymarket() {
-  const cached = await loadPolymarketCache();
-  if (cached.size > 0) console.log(`Resuming from local cache: ${cached.size} match(es) already fetched in a previous run.`);
-  const matches = [...cached.values()];
-
-  for (const competition of BACKFILL_COMPETITIONS) {
-    const events = await findResolvedMatches(competition);
-    console.log(`[${competition}] ${events.length} resolved event(s) found, fetching trades for each...`);
-    for (const event of events) {
-      const id = String(event.id);
-      if (cached.has(id)) continue; // already fetched (and cached) in a previous, possibly-interrupted run
-
-      const { homeTeam, awayTeam, home, draw, away } = classifyMarketsFromEvent(event);
-      if (!home || !draw || !away) {
-        console.log(`  SKIP "${event.title}" — could not classify all 3 markets`);
-        continue;
-      }
-      const result = resultFromMarkets(home, draw, away);
-      if (!result) {
-        console.log(`  SKIP "${event.title}" — no determined result (postponed/voided)`);
-        continue; // matches this file's own filter: needs a determined result
-      }
-      const rawTrades = [...(await getAllTrades(home.conditionId)), ...(await getAllTrades(draw.conditionId)), ...(await getAllTrades(away.conditionId))];
-      console.log(`  ${event.title}: result=${result} trades=${rawTrades.length}`);
-      const match = {
-        id,
-        competition,
-        homeTeam,
-        awayTeam,
-        result,
-        marketConditionIds: { home: home.conditionId, draw: draw.conditionId, away: away.conditionId },
-        trades: rawTrades.map(toStoredTrade),
-      };
-      matches.push(match);
-      appendFileSync(POLYMARKET_CACHE_PATH, JSON.stringify(match) + "\n");
-    }
-    console.log(`  ${matches.length} total match(es) with a determined result so far, across all competitions processed.`);
-  }
-  return matches;
+  return matchRows.map((m) => ({
+    id: m.id,
+    competition: m.competition,
+    homeTeam: m.homeTeam,
+    awayTeam: m.awayTeam,
+    result: m.result,
+    marketConditionIds: { home: m.home, draw: m.draw, away: m.away },
+    trades: tradesByMatch.get(m.id) || [],
+  }));
 }
 
 // Flattens every (wallet, trade, match) triple into a single row with the
@@ -305,17 +196,50 @@ function computeTrend(walletRows, prior) {
   };
 }
 
+const WALLET_UPSERT_CHUNK = 500;
+const WALLET_COLS = ["address", "total_resolved_trades", "aggregate_win_rate", "aggregate_roi", "tier", "by_slice", "trend", "last_updated"];
+
+// Firestore's write-rate ceiling forced these out one at a time, paced
+// ~1.1s apart, with a local resume file to survive a run that took hours.
+// Postgres has no comparable per-request quota, so this is just a handful
+// of chunked bulk upserts.
+async function upsertWallets(pool, wallets) {
+  for (let i = 0; i < wallets.length; i += WALLET_UPSERT_CHUNK) {
+    const group = wallets.slice(i, i + WALLET_UPSERT_CHUNK);
+    const values = [];
+    const params = [];
+    group.forEach((w, idx) => {
+      const base = idx * WALLET_COLS.length;
+      values.push(`(${WALLET_COLS.map((_, j) => `$${base + j + 1}`).join(", ")})`);
+      params.push(w.wallet, w.totalResolvedTrades, w.aggregateWinRate, w.aggregateROI, w.tier, JSON.stringify(w.bySlice), JSON.stringify(w.trend), w.lastUpdated);
+    });
+    await pool.query(
+      `INSERT INTO wallets (${WALLET_COLS.join(", ")}) VALUES ${values.join(", ")}
+       ON CONFLICT (address) DO UPDATE SET
+         total_resolved_trades = EXCLUDED.total_resolved_trades,
+         aggregate_win_rate = EXCLUDED.aggregate_win_rate,
+         aggregate_roi = EXCLUDED.aggregate_roi,
+         tier = EXCLUDED.tier,
+         by_slice = EXCLUDED.by_slice,
+         trend = EXCLUDED.trend,
+         last_updated = EXCLUDED.last_updated`,
+      params
+    );
+    console.log(`  ${Math.min(i + WALLET_UPSERT_CHUNK, wallets.length)}/${wallets.length} wallet(s) written...`);
+  }
+}
+
 async function main() {
-  const db = getDb();
-  const fromPolymarket = process.env.RANK_WALLETS_FROM_POLYMARKET === "1";
-  console.log(fromPolymarket ? "Loading resolved matches + trades directly from Polymarket (Firestore reads bypassed)..." : "Loading resolved matches + trades...");
-  const matches = fromPolymarket ? await loadResolvedMatchesFromPolymarket() : await loadResolvedMatchesWithTrades(db);
+  const pool = getPool();
+  console.log("Loading resolved matches + trades...");
+  const matches = await loadResolvedMatchesWithTrades(pool);
   console.log(`${matches.length} resolved match(es) with a determined result.`);
 
   const rows = buildTradeRows(matches);
   console.log(`${rows.length} trade row(s) joined to a match result.`);
   if (rows.length === 0) {
     console.log("Nothing to rank yet.");
+    await pool.end();
     return;
   }
 
@@ -377,48 +301,22 @@ async function main() {
 
   // Only wallets that clear the activity bar are analytically meaningful —
   // the same MIN_TRADES bar already used everywhere else in this file (see
-  // sliceBy's own "enough" check). Found necessary live: this dataset has
-  // ~200k distinct wallets, the overwhelming majority one-off/low-volume
-  // noise traders that will never be tier:"watch" and are unlikely to ever
-  // be looked up individually. Writing all of them isn't just slow under
-  // the current write constraints, it's genuinely not useful — Tier 1's
-  // "log everyone, no filtering" is about the raw trade log (PROJECT.md),
-  // not about every one-off trader needing a processed ranking document.
+  // sliceBy's own "enough" check). This dataset has ~200k distinct wallets,
+  // the overwhelming majority one-off/low-volume noise traders that will
+  // never be tier:"watch" and are unlikely to ever be looked up
+  // individually. Tier 1's "log everyone, no filtering" is about the raw
+  // trade log (PROJECT.md), not about every one-off trader needing a
+  // processed ranking row.
   const toWrite = results.filter((r) => r.totalResolvedTrades >= MIN_TRADES);
   console.log(`\n${results.length} distinct wallet(s) total, ${toWrite.length} clear the ${MIN_TRADES}-trade activity bar and will be written.`);
 
-  const alreadyWritten = existsSync(WRITTEN_WALLETS_PATH)
-    ? new Set(readFileSync(WRITTEN_WALLETS_PATH, "utf8").split("\n").filter(Boolean))
-    : new Set();
-  if (alreadyWritten.size > 0) console.log(`${alreadyWritten.size} wallet(s) already written in a previous run — skipping those.`);
-
-  console.log("\nWriting wallets/ one at a time (see rankWallets.js's own comment on why not batched)...");
-  let written = 0;
-  for (const r of toWrite) {
-    if (alreadyWritten.has(r.wallet)) continue;
-    await db.collection("wallets").doc(r.wallet).set(r);
-    appendFileSync(WRITTEN_WALLETS_PATH, r.wallet + "\n");
-    written++;
-    if (written % 100 === 0) console.log(`  ${written} written so far (${toWrite.length - alreadyWritten.size - written} remaining)...`);
-  }
-  console.log(`\nDone. ${written} wallet(s) written this run.`);
+  console.log("\nWriting wallets...");
+  await upsertWallets(pool, toWrite);
+  console.log(`\nDone. ${toWrite.length} wallet(s) written this run.`);
+  await pool.end();
 }
 
-export {
-  shrink,
-  pnlAndStake,
-  legFor,
-  buildTradeRows,
-  summarize,
-  sliceBy,
-  monthKey,
-  computeTrend,
-  classifyMarketsFromEvent,
-  resultFromMarkets,
-  MIN_TRADES,
-  SHRINKAGE_K,
-  TREND_THRESHOLD,
-};
+export { shrink, pnlAndStake, legFor, buildTradeRows, summarize, sliceBy, monthKey, computeTrend, MIN_TRADES, SHRINKAGE_K, TREND_THRESHOLD };
 
 if (isMainModule(import.meta.url)) {
   main().catch((err) => {

@@ -1,5 +1,5 @@
-// Mirrors the Firestore data model in PROJECT.md, as actually written by
-// pipeline/src/{collect,backfill,rankWallets,scoreMatches,paperBets}.js.
+// Mirrors the Postgres data model in supabase/migrations, as actually
+// written by pipeline/src/{collect,backfill,rankWallets,scoreMatches,paperBets}.js.
 
 export type Competition = "EPL" | "UCL" | "UEL" | "UECL";
 export type Leg = "home" | "draw" | "away";

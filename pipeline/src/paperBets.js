@@ -3,7 +3,7 @@
 // each run: place a flat-stake bet on any frozen confluence score whose
 // edge clears a threshold, then settle any pending bet whose match has
 // since resolved.
-import { getDb } from "./firestoreRest.js";
+import { getPool } from "./db.js";
 import { isMainModule } from "./isMain.js";
 
 // "A meaningful positive edge" and "flat stake" per Milestone 5's prompt —
@@ -60,53 +60,75 @@ export function settleBet(bet, match) {
   return { outcome: win ? "win" : "loss", pnl, settledAt: new Date().toISOString() };
 }
 
-async function placeBets(db) {
-  const scores = await db.collection("confluenceScores").list();
-  let placed = 0;
-  for (const scoreDoc of scores) {
-    const betRef = db.collection("paperBets").doc(scoreDoc.id);
-    const existing = await betRef.get();
-    if (existing.exists) continue;
+// A single LEFT JOIN replaces the per-score existence check Firestore
+// needed (one .get() per confluence score, every run).
+async function placeBets(pool) {
+  const { rows } = await pool.query(
+    `SELECT cs.id, cs.match_id AS "matchId", cs.tracked_leg AS "trackedLeg", cs.edge,
+            cs.market_implied_probability AS "marketImpliedProbability"
+     FROM confluence_scores cs
+     LEFT JOIN paper_bets pb ON pb.id = cs.id
+     WHERE pb.id IS NULL`
+  );
 
-    const bet = decideBet({ id: scoreDoc.id, ...scoreDoc.data() });
+  let placed = 0;
+  for (const score of rows) {
+    const bet = decideBet(score);
     if (!bet) continue;
 
-    await betRef.set(bet);
+    await pool.query(
+      `INSERT INTO paper_bets (id, match_id, score_id, tracked_leg, edge_at_bet, price_at_bet, stake, outcome, pnl, placed_at, settled_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       ON CONFLICT (id) DO NOTHING`,
+      [bet.scoreId, bet.matchId, bet.scoreId, bet.trackedLeg, bet.edgeAtBet, bet.priceAtBet, bet.stake, bet.outcome, bet.pnl, bet.placedAt, bet.settledAt]
+    );
     placed++;
     console.log(`  placed bet on ${bet.matchId}/${bet.trackedLeg}: edge=${(bet.edgeAtBet * 100).toFixed(1)}pp stake=$${bet.stake}`);
   }
   return placed;
 }
 
-async function settleBets(db) {
-  const bets = await db.collection("paperBets").list();
-  let settled = 0;
-  for (const betDoc of bets) {
-    const bet = betDoc.data();
-    if (bet.outcome !== "pending") continue;
+// A JOIN against matches replaces the per-bet match lookup Firestore needed.
+// A pending bet whose match doesn't exist (yet) simply won't appear here —
+// same as settleBet(bet, null) returning null, just without the extra round trip.
+async function settleBets(pool) {
+  const { rows } = await pool.query(
+    `SELECT pb.id, pb.match_id AS "matchId", pb.tracked_leg AS "trackedLeg", pb.price_at_bet AS "priceAtBet", pb.stake,
+            m.resolved, m.result
+     FROM paper_bets pb
+     JOIN matches m ON m.event_id = pb.match_id
+     WHERE pb.outcome = 'pending'`
+  );
 
-    const matchDoc = await db.collection("matches").doc(bet.matchId).get();
-    const settlement = settleBet(bet, matchDoc.exists ? matchDoc.data() : null);
+  let settled = 0;
+  for (const row of rows) {
+    const settlement = settleBet(row, { resolved: row.resolved, result: row.result });
     if (!settlement) continue;
 
-    await betDoc.ref.set(settlement, { merge: true });
+    await pool.query(`UPDATE paper_bets SET outcome = $1, pnl = $2, settled_at = $3 WHERE id = $4`, [
+      settlement.outcome,
+      settlement.pnl,
+      settlement.settledAt,
+      row.id,
+    ]);
     settled++;
-    console.log(`  settled ${bet.matchId}/${bet.trackedLeg}: ${settlement.outcome} pnl=${settlement.pnl.toFixed(2)}`);
+    console.log(`  settled ${row.matchId}/${row.trackedLeg}: ${settlement.outcome} pnl=${settlement.pnl.toFixed(2)}`);
   }
   return settled;
 }
 
 async function main() {
-  const db = getDb();
+  const pool = getPool();
   console.log(`Edge threshold: ${(EDGE_THRESHOLD * 100).toFixed(1)}pp, flat stake: $${STAKE}`);
 
   console.log("\nPlacing new bets...");
-  const placed = await placeBets(db);
+  const placed = await placeBets(pool);
   console.log(`${placed} new bet(s) placed.`);
 
   console.log("\nSettling pending bets...");
-  const settled = await settleBets(db);
+  const settled = await settleBets(pool);
   console.log(`${settled} bet(s) settled.`);
+  await pool.end();
 }
 
 if (isMainModule(import.meta.url)) {

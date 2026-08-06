@@ -11,10 +11,10 @@ A personal, single-user research tool that watches Polymarket's prediction marke
 
 | Path | What it is |
 |---|---|
-| `pipeline/` | Node.js scripts that pull Polymarket data and read/write Firestore, run on a schedule via GitHub Actions. See `pipeline/README.md`. |
-| `dashboard/` | Next.js dashboard reading the same Firestore data, read-only. See `dashboard/README.md`. Not deployed yet — local only. |
+| `pipeline/` | Node.js scripts that pull Polymarket data and read/write Supabase (Postgres), run on a schedule via GitHub Actions. See `pipeline/README.md`. |
+| `dashboard/` | Next.js dashboard reading the same Supabase data, read-only. See `dashboard/README.md`. Not deployed yet — local only. |
 | `milestone1-probe/` | Throwaway script from the very first milestone (verifying what Polymarket's APIs actually return before building anything real on top of them). Kept for reference, not part of the running system. |
 
 ## Status
 
-Built through Milestone 6 (dashboard scaffold) of `PROJECT.md`'s plan. Currently blocked on a Firestore write throttle on the free-tier project this uses — see `NOTES.md`'s status section for the live details. The dashboard and pipeline logic are both built and unit-tested ahead of having real data to validate them against, which is itself a deliberate, discussed tradeoff (also in `NOTES.md`), not an oversight.
+Migrated off Firestore to Supabase (Postgres) after hitting a write-rate ceiling far below documented free-tier quotas, then a comparable read-quota wall — see `NOTES.md` for the full history. The dashboard and pipeline now both read/write the same Postgres database directly.
