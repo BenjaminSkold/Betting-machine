@@ -4,16 +4,22 @@ import { MIN_SETTLED_BETS_TO_TRUST } from "@/lib/types";
 
 export default async function PerformancePage() {
   const bets = await getPaperBets();
-  const settled = bets.filter((b) => b.data.outcome !== "pending");
-  const wins = settled.filter((b) => b.data.outcome === "win");
   const pending = bets.filter((b) => b.data.outcome === "pending");
+  const voided = bets.filter((b) => b.data.outcome === "void");
+  // "Decided" excludes void (postponed/voided match, stake refunded) from
+  // win rate/ROI and the trust threshold — a void carries no information
+  // about whether the edge strategy works, so counting it would both
+  // understate a real win rate (denominator grows, numerator doesn't) and
+  // let void bets pad the way toward "trustworthy" with zero signal.
+  const decided = bets.filter((b) => b.data.outcome === "win" || b.data.outcome === "loss");
+  const wins = decided.filter((b) => b.data.outcome === "win");
 
-  const bankroll = settled.reduce((sum, b) => sum + (b.data.pnl ?? 0), 0);
-  const totalStaked = settled.reduce((sum, b) => sum + b.data.stake, 0);
-  const winRate = settled.length > 0 ? wins.length / settled.length : null;
+  const bankroll = decided.reduce((sum, b) => sum + (b.data.pnl ?? 0), 0);
+  const totalStaked = decided.reduce((sum, b) => sum + b.data.stake, 0);
+  const winRate = decided.length > 0 ? wins.length / decided.length : null;
   const roi = totalStaked > 0 ? bankroll / totalStaked : null;
 
-  const trustworthy = settled.length >= MIN_SETTLED_BETS_TO_TRUST;
+  const trustworthy = decided.length >= MIN_SETTLED_BETS_TO_TRUST;
 
   return (
     <div className="max-w-4xl">
@@ -28,7 +34,7 @@ export default async function PerformancePage() {
           className="mb-6 rounded-lg px-4 py-3 text-sm"
           style={{ background: "color-mix(in srgb, var(--status-warning) 15%, var(--surface-1))", border: "1px solid var(--status-warning)" }}
         >
-          <span className="font-medium text-[var(--text-primary)]">N={settled.length}, too early to tell.</span>{" "}
+          <span className="font-medium text-[var(--text-primary)]">N={decided.length}, too early to tell.</span>{" "}
           <span className="text-[var(--text-secondary)]">
             PROJECT.md&apos;s own bar is {MIN_SETTLED_BETS_TO_TRUST}+ settled bets (or a full season) before treating win rate, ROI, or
             any edge-by-segment finding as real rather than noise. The numbers below are shown for visibility, not as a verdict.
@@ -37,10 +43,10 @@ export default async function PerformancePage() {
       )}
 
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-        <StatTile label="Fake bankroll" value={`$${bankroll.toFixed(2)}`} delta={settled.length > 0 ? `${settled.length} settled` : undefined} deltaGood={bankroll >= 0} />
+        <StatTile label="Fake bankroll" value={`$${bankroll.toFixed(2)}`} delta={decided.length > 0 ? `${decided.length} decided` : undefined} deltaGood={bankroll >= 0} />
         <StatTile label="Win rate" value={winRate !== null ? `${(winRate * 100).toFixed(1)}%` : "—"} />
         <StatTile label="ROI" value={roi !== null ? `${(roi * 100).toFixed(1)}%` : "—"} deltaGood={roi !== null ? roi >= 0 : undefined} delta={roi !== null ? (roi >= 0 ? "profitable" : "down") : undefined} />
-        <StatTile label="Pending bets" value={String(pending.length)} />
+        <StatTile label="Pending / voided" value={`${pending.length} / ${voided.length}`} />
       </div>
 
       <h2 className="mt-8 mb-3 text-sm font-semibold uppercase tracking-wide text-[var(--text-muted)]">Bet log</h2>
@@ -89,7 +95,7 @@ export default async function PerformancePage() {
   );
 }
 
-function StatusBadge({ outcome }: { outcome: "win" | "loss" | "pending" }) {
+function StatusBadge({ outcome }: { outcome: "win" | "loss" | "pending" | "void" }) {
   const color = outcome === "win" ? "var(--status-good)" : outcome === "loss" ? "var(--status-critical)" : "var(--text-muted)";
   return (
     <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--text-secondary)]">

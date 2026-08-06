@@ -42,8 +42,18 @@ export function decideBet(score, { edgeThreshold = EDGE_THRESHOLD, stake = STAKE
 // Buying `stake` dollars of shares at `price` -> `stake/price` shares.
 // Win: shares resolve to $1 each, pnl = stake/price - stake.
 // Loss: shares resolve to $0, pnl = -stake (the whole stake is lost).
+//
+// A match can be `resolved: true` with `result: null` — Polymarket voided
+// or postponed it without any leg settling ~1 (see resultFrom() in
+// collect.js/backfill.js). Without this case, settleBet returned null for
+// that match forever (the same as "not yet resolved"), so its paper bet
+// stayed "pending" indefinitely with no way to ever close it out. Found by
+// an independent code review. A void settles as its own outcome — not a
+// win, not a loss, stake refunded (pnl 0) — rather than silently
+// disappearing into the loss bucket or staying open forever.
 export function settleBet(bet, match) {
-  if (!match || !match.resolved || !match.result) return null;
+  if (!match || !match.resolved) return null;
+  if (!match.result) return { outcome: "void", pnl: 0, settledAt: new Date().toISOString() };
   const win = bet.trackedLeg === match.result;
   const pnl = win ? bet.stake / bet.priceAtBet - bet.stake : -bet.stake;
   return { outcome: win ? "win" : "loss", pnl, settledAt: new Date().toISOString() };

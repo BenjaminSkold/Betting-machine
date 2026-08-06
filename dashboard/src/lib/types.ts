@@ -80,7 +80,7 @@ export interface PaperBet {
   edgeAtBet: number;
   priceAtBet: number;
   stake: number;
-  outcome: "win" | "loss" | "pending";
+  outcome: "win" | "loss" | "pending" | "void"; // void: match was postponed/voided, stake refunded (pnl 0)
   pnl: number | null;
   placedAt: string;
   settledAt: string | null;

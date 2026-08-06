@@ -71,5 +71,13 @@ const lossSettlement = settleBet(
 check("loss outcome", lossSettlement.outcome, "loss");
 check("loss pnl", lossSettlement.pnl, -10);
 
+// --- Regression: resolved: true with result: null (voided/postponed, per
+// resultFrom()'s documented ambiguous case) must settle as its own "void"
+// outcome, not stay pending forever. Found by an independent code review.
+const voidSettlement = settleBet({ stake: 10, priceAtBet: 0.4, trackedLeg: "home" }, { resolved: true, result: null });
+check("voided match settles (not null/still-pending)", voidSettlement !== null, true);
+check("voided match outcome is 'void', not win/loss", voidSettlement.outcome, "void");
+check("voided match refunds the stake (pnl 0), doesn't count as a loss", voidSettlement.pnl, 0);
+
 console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) FAILED.`);
 process.exit(failures === 0 ? 0 : 1);
