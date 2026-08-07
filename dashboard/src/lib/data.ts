@@ -160,3 +160,33 @@ export async function getFilteredTradeRows(filters: TradeFilters): Promise<Trade
   rows.sort((a, b) => b.timestamp - a.timestamp);
   return rows;
 }
+
+// Every resolved match's frozen confluence scores, with whether the
+// tracked leg actually happened -- the raw input to lib/calibration.ts's
+// bucketing. One row per score, not per match (a match can have many
+// scores under the adaptive polling schedule).
+export async function getCalibrationInputs(): Promise<{ probabilityEstimate: number; correct: boolean }[]> {
+  const { rows } = await getClient().execute(`
+    SELECT cs.probability_estimate AS "probabilityEstimate", cs.tracked_leg AS "trackedLeg", m.result
+    FROM confluence_scores cs
+    JOIN matches m ON m.event_id = cs.match_id
+    WHERE m.resolved = 1 AND m.result IS NOT NULL AND cs.probability_estimate IS NOT NULL
+  `);
+  return (rows as unknown as { probabilityEstimate: number; trackedLeg: string; result: string }[]).map((r) => ({
+    probabilityEstimate: r.probabilityEstimate,
+    correct: r.trackedLeg === r.result,
+  }));
+}
+
+// Every decided (win/loss) paper bet, with the minutesBeforeKickoff of the
+// confluence score it was placed against -- the raw input to
+// lib/breakdown.ts's timingBucketLabel segmentation.
+export async function getTimingCheckpointInputs(): Promise<{ outcome: string; pnl: number | null; stake: number; minutesBeforeKickoff: number }[]> {
+  const { rows } = await getClient().execute(`
+    SELECT pb.outcome, pb.pnl, pb.stake, cs.minutes_before_kickoff AS "minutesBeforeKickoff"
+    FROM paper_bets pb
+    JOIN confluence_scores cs ON cs.id = pb.score_id
+    WHERE pb.outcome IN ('win', 'loss')
+  `);
+  return rows as unknown as { outcome: string; pnl: number | null; stake: number; minutesBeforeKickoff: number }[];
+}

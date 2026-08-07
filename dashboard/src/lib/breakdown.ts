@@ -80,3 +80,28 @@ export function sortByBucketOrder(segments: Segment[]): Segment[] {
 export function favoriteUnderdogLabel(priceAtBet: number): string {
   return priceAtBet > 0.5 ? "Favorite" : "Underdog";
 }
+
+// Timing-checkpoint segmentation: which pre-kickoff moment a bet's
+// underlying confluence score was frozen at. The adaptive polling schedule
+// (see PROJECT.md) produces a near-continuous range of minutesBeforeKickoff
+// values now, not a fixed 60/15/10 set, so this buckets into the same
+// ramp the schedule itself uses -- the empirical question ("what's the
+// best entry timing") only makes sense sliced the same way polling
+// actually ramps up.
+export const TIMING_BUCKETS: { label: string; max: number }[] = [
+  { label: "Live (post-kickoff)", max: 0 },
+  { label: "0–15 min", max: 15 },
+  { label: "15–60 min", max: 60 },
+  { label: "1–4 hr", max: 240 },
+  { label: "4–24 hr", max: 1440 },
+  { label: "1+ day", max: Infinity },
+];
+
+export function timingBucketLabel(minutesBeforeKickoff: number): string {
+  if (minutesBeforeKickoff <= 0) return TIMING_BUCKETS[0].label;
+  return TIMING_BUCKETS.find((b) => minutesBeforeKickoff <= b.max)?.label ?? TIMING_BUCKETS[TIMING_BUCKETS.length - 1].label;
+}
+
+export function sortByTimingBucketOrder(segments: Segment[]): Segment[] {
+  return [...segments].sort((a, b) => TIMING_BUCKETS.findIndex((t) => t.label === a.key) - TIMING_BUCKETS.findIndex((t) => t.label === b.key));
+}

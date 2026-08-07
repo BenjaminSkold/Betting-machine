@@ -1,7 +1,11 @@
 import Link from "next/link";
 import { getAllConfluenceScores, getMatches, getSystemStatus } from "@/lib/data";
-import type { Competition, ConfluenceScore } from "@/lib/types";
+import type { ConfluenceScore } from "@/lib/types";
 import { freshnessAge } from "@/lib/time";
+import { parseFilters, isMatchInDateRange } from "@/lib/filters";
+import FilterBar from "@/components/FilterBar";
+import FadeIn from "@/components/FadeIn";
+import EdgeBadge from "@/components/EdgeBadge";
 
 export const dynamic = "force-dynamic";
 
@@ -10,23 +14,10 @@ function formatKickoff(iso: string): string {
   return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
-function pct(x: number | null | undefined): string {
-  if (x === null || x === undefined) return "—";
-  return `${(x * 100).toFixed(1)}%`;
-}
-
-const COMPETITIONS: Competition[] = ["EPL", "UCL", "UEL", "UECL"];
-
-export default async function MatchesPage({ searchParams }: { searchParams: Promise<{ competition?: string; q?: string }> }) {
-  const params = await searchParams;
+export default async function MatchesPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
+  const rawParams = await searchParams;
+  const filters = parseFilters(rawParams);
   const [allMatches, scores, status] = await Promise.all([getMatches(), getAllConfluenceScores(), getSystemStatus()]);
-
-  const q = params.q?.toLowerCase().trim();
-  const matches = allMatches.filter((m) => {
-    if (params.competition && m.data.competition !== params.competition) return false;
-    if (q && !`${m.data.homeTeam} ${m.data.awayTeam}`.toLowerCase().includes(q)) return false;
-    return true;
-  });
 
   const scoresByMatch = new Map<string, ConfluenceScore[]>();
   for (const s of scores) {
@@ -40,6 +31,19 @@ export default async function MatchesPage({ searchParams }: { searchParams: Prom
     return [...list].sort((a, b) => a.minutesBeforeKickoff - b.minutesBeforeKickoff)[0];
   };
 
+  const teamQuery = filters.team?.toLowerCase().trim();
+  const edgeMin = filters.edgeMin ? Number(filters.edgeMin) : null;
+  const matches = allMatches.filter((m) => {
+    if (filters.competition && m.data.competition !== filters.competition) return false;
+    if (teamQuery && !`${m.data.homeTeam} ${m.data.awayTeam}`.toLowerCase().includes(teamQuery)) return false;
+    if (!isMatchInDateRange(m.data.kickoffTime, filters)) return false;
+    if (edgeMin !== null) {
+      const score = latestScoreFor(m.id);
+      if (!score || Math.abs(score.edge) < edgeMin / 100) return false;
+    }
+    return true;
+  });
+
   const upcoming = matches.filter((m) => !m.data.resolved).sort((a, b) => a.data.kickoffTime.localeCompare(b.data.kickoffTime));
   const recent = matches
     .filter((m) => m.data.resolved)
@@ -51,7 +55,10 @@ export default async function MatchesPage({ searchParams }: { searchParams: Prom
   return (
     <div className="max-w-4xl">
       <div className="mb-6 flex flex-wrap items-baseline justify-between gap-2">
-        <h1 className="text-2xl font-semibold text-[var(--text-primary)]">Matches</h1>
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight text-[var(--text-primary)]">Matches</h1>
+          <p className="text-sm text-[var(--text-secondary)]">Confluence score and edge, live as the market moves.</p>
+        </div>
         <div className="flex items-center gap-1.5 text-xs text-[var(--text-muted)]">
           <span
             className="inline-block h-2 w-2 rounded-full"
@@ -61,41 +68,10 @@ export default async function MatchesPage({ searchParams }: { searchParams: Prom
         </div>
       </div>
 
-      <form role="search" aria-label="Filter matches" className="mb-6 flex flex-wrap gap-3 rounded-lg border border-[var(--border)] bg-[var(--surface-1)] p-3">
-        <label htmlFor="match-search" className="sr-only">
-          Search team name
-        </label>
-        <input
-          id="match-search"
-          type="text"
-          name="q"
-          defaultValue={params.q}
-          placeholder="Search team name"
-          className="flex-1 min-w-[220px] rounded-md border border-[var(--border)] bg-[var(--page-plane)] px-3 py-1.5 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)]"
-        />
-        <label htmlFor="match-competition" className="sr-only">
-          Filter by competition
-        </label>
-        <select
-          id="match-competition"
-          name="competition"
-          defaultValue={params.competition ?? ""}
-          className="rounded-md border border-[var(--border)] bg-[var(--page-plane)] px-3 py-1.5 text-sm text-[var(--text-primary)]"
-        >
-          <option value="">All competitions</option>
-          {COMPETITIONS.map((c) => (
-            <option key={c} value={c}>
-              {c}
-            </option>
-          ))}
-        </select>
-        <button type="submit" className="rounded-md px-4 py-1.5 text-sm font-medium" style={{ background: "var(--diverging-pos)", color: "white" }}>
-          Filter
-        </button>
-      </form>
+      <FilterBar fields={["competition", "dateRange", "team", "edgeMin"]} />
 
-      <Section title="Upcoming" matches={upcoming} latestScoreFor={latestScoreFor} emptyText="No upcoming matches tracked yet." />
-      <Section title="Recent" matches={recent} latestScoreFor={latestScoreFor} emptyText="No resolved matches yet." />
+      <Section title="Upcoming" matches={upcoming} latestScoreFor={latestScoreFor} emptyText="No upcoming matches match these filters." />
+      <Section title="Recent" matches={recent} latestScoreFor={latestScoreFor} emptyText="No resolved matches match these filters." />
     </div>
   );
 }
@@ -118,40 +94,24 @@ function Section({
         <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-1)] px-4 py-6 text-sm text-[var(--text-muted)]">{emptyText}</div>
       ) : (
         <div className="flex flex-col gap-2">
-          {matches.map((m) => {
+          {matches.map((m, i) => {
             const score = latestScoreFor(m.id);
             return (
-              <Link
-                key={m.id}
-                href={`/matches/${m.id}`}
-                className="flex items-center justify-between gap-3 rounded-lg border border-[var(--border)] bg-[var(--surface-1)] px-4 py-3 hover:border-[var(--baseline)]"
-              >
-                <div className="min-w-0">
-                  <div className="text-xs font-medium text-[var(--text-muted)]">{m.data.competition}</div>
-                  <div className="font-medium text-[var(--text-primary)]">
-                    {m.data.homeTeam} vs. {m.data.awayTeam}
+              <FadeIn key={m.id} index={i}>
+                <Link
+                  href={`/matches/${m.id}`}
+                  className="group flex items-center justify-between gap-3 rounded-lg border border-[var(--border)] bg-[var(--surface-1)] px-4 py-3 shadow-[0_1px_2px_rgba(0,0,0,0.04)] transition-all duration-150 hover:-translate-y-0.5 hover:border-[var(--baseline)] hover:shadow-[0_4px_16px_rgba(0,0,0,0.08)]"
+                >
+                  <div className="min-w-0">
+                    <div className="text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)]">{m.data.competition}</div>
+                    <div className="font-medium text-[var(--text-primary)]">
+                      {m.data.homeTeam} <span className="text-[var(--text-muted)]">vs.</span> {m.data.awayTeam}
+                    </div>
+                    <div className="text-xs text-[var(--text-secondary)]">{formatKickoff(m.data.kickoffTime)}</div>
                   </div>
-                  <div className="text-xs text-[var(--text-secondary)]">{formatKickoff(m.data.kickoffTime)}</div>
-                </div>
-                <div className="shrink-0 text-right">
-                  {score ? (
-                    <>
-                      <div
-                        className="tabular text-xl font-semibold"
-                        style={{ color: score.edge >= 0 ? "var(--diverging-pos)" : "var(--diverging-neg)" }}
-                      >
-                        {score.edge >= 0 ? "+" : ""}
-                        {(score.edge * 100).toFixed(1)}pp
-                      </div>
-                      <div className="text-xs text-[var(--text-muted)]">
-                        {score.trackedLeg} · {pct(score.probabilityEstimate)} vs {pct(score.marketImpliedProbability)}
-                      </div>
-                    </>
-                  ) : (
-                    <div className="text-sm text-[var(--text-muted)]">No score yet</div>
-                  )}
-                </div>
-              </Link>
+                  <div className="shrink-0">{score ? <EdgeBadge score={score} /> : <div className="text-sm text-[var(--text-muted)]">No score yet</div>}</div>
+                </Link>
+              </FadeIn>
             );
           })}
         </div>

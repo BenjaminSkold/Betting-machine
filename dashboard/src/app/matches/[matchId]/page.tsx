@@ -1,7 +1,10 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { ArrowLeft } from "lucide-react";
 import { getMatch, getMatchScores, getMatchTrades } from "@/lib/data";
 import PriceHistoryChart, { type PricePoint } from "@/components/PriceHistoryChart";
+import EdgeBadge from "@/components/EdgeBadge";
+import FadeIn from "@/components/FadeIn";
 import type { Leg } from "@/lib/types";
 import { isValidMatchId } from "@/lib/validate";
 
@@ -27,6 +30,8 @@ export async function generateMetadata({ params }: { params: Promise<{ matchId: 
   return { title: match ? `${match.data.homeTeam} vs. ${match.data.awayTeam}` : "Match not found" };
 }
 
+const ACTIVITY_FEED_LIMIT = 50;
+
 export default async function MatchDetailPage({ params }: { params: Promise<{ matchId: string }> }) {
   const { matchId } = await params;
   if (!isValidMatchId(matchId)) notFound();
@@ -35,63 +40,111 @@ export default async function MatchDetailPage({ params }: { params: Promise<{ ma
 
   const [scores, trades] = await Promise.all([getMatchScores(matchId), getMatchTrades(matchId)]);
   const sortedScores = [...scores].sort((a, b) => b.data.minutesBeforeKickoff - a.data.minutesBeforeKickoff);
+  const latestScore = [...scores].sort((a, b) => a.data.minutesBeforeKickoff - b.data.minutesBeforeKickoff)[0]?.data;
 
   const ids = match.data.marketConditionIds;
   const home = legSeries(trades, ids?.home);
   const draw = legSeries(trades, ids?.draw);
   const away = legSeries(trades, ids?.away);
 
+  const legByCondition = new Map<string, Leg>();
+  if (ids?.home) legByCondition.set(ids.home, "home");
+  if (ids?.draw) legByCondition.set(ids.draw, "draw");
+  if (ids?.away) legByCondition.set(ids.away, "away");
+  const recentTrades = [...trades].sort((a, b) => b.timestamp - a.timestamp).slice(0, ACTIVITY_FEED_LIMIT);
+  const legLabel: Record<Leg, string> = { home: match.data.homeTeam, draw: "Draw", away: match.data.awayTeam };
+
   return (
     <div className="max-w-4xl">
-      <Link href="/matches" className="text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
-        ← Matches
+      <Link href="/matches" className="inline-flex items-center gap-1 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
+        <ArrowLeft size={14} /> Matches
       </Link>
 
-      <div className="mt-2 mb-6">
-        <div className="text-xs font-medium text-[var(--text-muted)]">{match.data.competition}</div>
-        <h1 className="text-2xl font-semibold text-[var(--text-primary)]">
-          {match.data.homeTeam} vs. {match.data.awayTeam}
-        </h1>
-        <div className="text-sm text-[var(--text-secondary)]">
-          {new Date(match.data.kickoffTime).toLocaleString()}
-          {match.data.resolved && match.data.result && ` · Result: ${match.data.result}`}
+      <div className="mt-3 mb-6 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)]">{match.data.competition}</div>
+          <h1 className="text-2xl font-semibold tracking-tight text-[var(--text-primary)]">
+            {match.data.homeTeam} <span className="text-[var(--text-muted)]">vs.</span> {match.data.awayTeam}
+          </h1>
+          <div className="text-sm text-[var(--text-secondary)]">
+            {new Date(match.data.kickoffTime).toLocaleString()}
+            {match.data.resolved && match.data.result && ` · Result: ${legLabel[match.data.result]}`}
+          </div>
         </div>
+        {latestScore && <EdgeBadge score={latestScore} />}
       </div>
 
-      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-[var(--text-muted)]">Price history</h2>
-      <PriceHistoryChart home={home} draw={draw} away={away} homeLabel={match.data.homeTeam} awayLabel={match.data.awayTeam} />
+      <FadeIn>
+        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-[var(--text-muted)]">Price history</h2>
+        <PriceHistoryChart home={home} draw={draw} away={away} homeLabel={match.data.homeTeam} awayLabel={match.data.awayTeam} />
+      </FadeIn>
 
       <h2 className="mt-8 mb-3 text-sm font-semibold uppercase tracking-wide text-[var(--text-muted)]">Confluence scores</h2>
       {sortedScores.length === 0 ? (
         <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-1)] px-4 py-6 text-sm text-[var(--text-muted)]">
-          No confluence score frozen for this match yet — scores are computed at the 60/15/10-minute checkpoints once watchlisted
-          wallets exist.
+          No confluence score frozen for this match yet — scores are computed per snapshot once watchlisted wallets exist.
         </div>
       ) : (
-        <div className="flex flex-col gap-4">
-          {sortedScores.map((s) => (
-            <ScoreCard key={s.id} score={s.data} homeTeam={match!.data.homeTeam} awayTeam={match!.data.awayTeam} />
+        <div className="flex flex-col gap-3">
+          {sortedScores.map((s, i) => (
+            <FadeIn key={s.id} index={i}>
+              <ScoreCard score={s.data} legLabel={legLabel} />
+            </FadeIn>
           ))}
+        </div>
+      )}
+
+      <h2 className="mt-8 mb-3 text-sm font-semibold uppercase tracking-wide text-[var(--text-muted)]">Wallet activity</h2>
+      {recentTrades.length === 0 ? (
+        <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-1)] px-4 py-6 text-sm text-[var(--text-muted)]">No trades logged yet.</div>
+      ) : (
+        <div className="overflow-x-auto rounded-lg border border-[var(--border)] bg-[var(--surface-1)]">
+          {trades.length > ACTIVITY_FEED_LIMIT && (
+            <div className="border-b border-[var(--border)] px-4 py-2 text-xs text-[var(--text-muted)]">
+              Showing the most recent {ACTIVITY_FEED_LIMIT} of {trades.length} trades.
+            </div>
+          )}
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-[var(--border)] text-left text-xs uppercase tracking-wide text-[var(--text-muted)]">
+                <th scope="col" className="px-4 py-2.5">Wallet</th>
+                <th scope="col" className="px-4 py-2.5">Leg</th>
+                <th scope="col" className="px-4 py-2.5">Side</th>
+                <th scope="col" className="tabular px-4 py-2.5 text-right">Size</th>
+                <th scope="col" className="tabular px-4 py-2.5 text-right">Price</th>
+                <th scope="col" className="tabular px-4 py-2.5 text-right">When</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recentTrades.map((t, i) => (
+                <tr key={i} className="border-b border-[var(--border)] text-[var(--text-secondary)] last:border-0 hover:bg-[var(--page-plane)]">
+                  <td className="px-4 py-2">
+                    <Link href={`/wallets/${t.wallet}`} className="font-mono text-xs text-[var(--diverging-pos)] hover:underline">
+                      {t.wallet.slice(0, 10)}…
+                    </Link>
+                  </td>
+                  <td className="px-4 py-2 text-xs">{legLabel[legByCondition.get(t.conditionId) ?? "draw"]}</td>
+                  <td className="px-4 py-2 text-xs">
+                    {t.side} {t.outcome}
+                  </td>
+                  <td className="tabular px-4 py-2 text-right text-xs text-[var(--text-primary)]">${t.size.toFixed(0)}</td>
+                  <td className="tabular px-4 py-2 text-right text-xs text-[var(--text-primary)]">{(t.price * 100).toFixed(1)}%</td>
+                  <td className="tabular px-4 py-2 text-right text-xs">{new Date(t.timestamp * 1000).toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
     </div>
   );
 }
 
-function ScoreCard({
-  score,
-  homeTeam,
-  awayTeam,
-}: {
-  score: Awaited<ReturnType<typeof getMatchScores>>[number]["data"];
-  homeTeam: string;
-  awayTeam: string;
-}) {
-  const legLabel: Record<Leg, string> = { home: homeTeam, draw: "Draw", away: awayTeam };
+function ScoreCard({ score, legLabel }: { score: Awaited<ReturnType<typeof getMatchScores>>[number]["data"]; legLabel: Record<Leg, string> }) {
   return (
-    <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-1)] p-4">
+    <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-1)] p-4 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-1">
-        <div className="text-sm font-medium text-[var(--text-primary)]">{score.minutesBeforeKickoff} min before kickoff</div>
+        <div className="text-sm font-medium text-[var(--text-primary)]">{score.minutesBeforeKickoff.toFixed(0)} min before kickoff</div>
         <div className="text-xs text-[var(--text-muted)]">frozen {new Date(score.frozenAt).toLocaleString()}</div>
       </div>
 
@@ -102,14 +155,11 @@ function ScoreCard({
           return (
             <div
               key={leg}
-              className="rounded-md p-3"
+              className="rounded-md p-3 transition-colors"
               style={{ background: tracked ? "var(--page-plane)" : "transparent", border: tracked ? "1px solid var(--baseline)" : "1px solid transparent" }}
             >
               <div className="text-xs font-medium text-[var(--text-secondary)]">{legLabel[leg]}</div>
-              <div
-                className="tabular text-lg font-semibold"
-                style={{ color: (b.edge ?? 0) >= 0 ? "var(--diverging-pos)" : "var(--diverging-neg)" }}
-              >
+              <div className="tabular text-lg font-semibold" style={{ color: (b.edge ?? 0) >= 0 ? "var(--diverging-pos)" : "var(--diverging-neg)" }}>
                 {b.edge !== null ? `${b.edge >= 0 ? "+" : ""}${(b.edge * 100).toFixed(1)}pp` : "—"}
               </div>
               <div className="text-xs text-[var(--text-muted)]">
@@ -123,7 +173,6 @@ function ScoreCard({
         })}
       </div>
 
-      {/* full breakdown — never just a headline number */}
       <details className="mt-3">
         <summary className="cursor-pointer text-xs text-[var(--text-secondary)]">Contributing wallets</summary>
         <div className="mt-2 flex flex-col gap-2 text-xs">

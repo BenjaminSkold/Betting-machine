@@ -1,4 +1,4 @@
-import { edgeBucketLabel, favoriteUnderdogLabel, segmentStats, sortByBucketOrder } from "./breakdown.ts";
+import { edgeBucketLabel, favoriteUnderdogLabel, segmentStats, sortByBucketOrder, timingBucketLabel, sortByTimingBucketOrder } from "./breakdown.ts";
 
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown) {
@@ -42,6 +42,25 @@ check("priceAtBet at exactly 50% is an underdog (not a favorite)", favoriteUnder
 check("priceAtBet just below 50% is an underdog", favoriteUnderdogLabel(0.49), "Underdog");
 check("a heavy favorite is still just 'Favorite'", favoriteUnderdogLabel(0.9), "Favorite");
 check("a heavy underdog is still just 'Underdog'", favoriteUnderdogLabel(0.05), "Underdog");
+
+check("negative minutesBeforeKickoff (post-kickoff) buckets to live", timingBucketLabel(-5), "Live (post-kickoff)");
+check("exactly 0 buckets to live", timingBucketLabel(0), "Live (post-kickoff)");
+check("10 min out buckets to 0-15 min", timingBucketLabel(10), "0–15 min");
+check("45 min out buckets to 15-60 min", timingBucketLabel(45), "15–60 min");
+check("2hr (120min) out buckets to 1-4hr", timingBucketLabel(120), "1–4 hr");
+check("12hr (720min) out buckets to 4-24hr", timingBucketLabel(720), "4–24 hr");
+check("3 days out buckets to 1+ day", timingBucketLabel(3 * 24 * 60), "1+ day");
+
+const scrambledTiming = [
+  { key: "1+ day", count: 1, winRate: 1, roi: 1 },
+  { key: "Live (post-kickoff)", count: 5, winRate: 0.5, roi: 0.1 },
+  { key: "15–60 min", count: 2, winRate: 0.5, roi: 0.1 },
+];
+check(
+  "sortByTimingBucketOrder restores the schedule's own ramp order",
+  sortByTimingBucketOrder(scrambledTiming).map((s) => s.key),
+  ["Live (post-kickoff)", "15–60 min", "1+ day"]
+);
 
 console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) FAILED.`);
 process.exit(failures === 0 ? 0 : 1);
