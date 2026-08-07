@@ -11,10 +11,10 @@ A personal, single-user research tool that watches Polymarket's prediction marke
 
 | Path | What it is |
 |---|---|
-| `pipeline/` | Node.js scripts that pull Polymarket data and read/write Supabase (Postgres), run on a schedule via GitHub Actions. See `pipeline/README.md`. |
-| `dashboard/` | Next.js dashboard reading the same Supabase data, read-only. See `dashboard/README.md`. Not deployed yet — local only. |
+| `pipeline/` | Node.js scripts that pull Polymarket data, write aggregates to Turso and raw trades to Cloudflare R2, run on a schedule via GitHub Actions. See `pipeline/README.md`. |
+| `dashboard/` | Next.js dashboard reading the same Turso + R2 data, read-only. See `dashboard/README.md`. Not deployed yet — local only. |
 | `milestone1-probe/` | Throwaway script from the very first milestone (verifying what Polymarket's APIs actually return before building anything real on top of them). Kept for reference, not part of the running system. |
 
 ## Status
 
-Migrated off Firestore to Supabase (Postgres) after hitting a write-rate ceiling far below documented free-tier quotas, then a comparable read-quota wall — see `NOTES.md` for the full history. The dashboard and pipeline now both read/write the same Postgres database directly.
+Migrated twice: Firestore → Supabase (Postgres) → Turso + Cloudflare R2, after each of the first two hit the same underlying wall (raw trade data doesn't fit in a single relational/document database's free tier once real volume exists) — see `NOTES.md` for the full history. The current architecture splits small aggregates (Turso) from the raw trade archive (R2, batched files) specifically to avoid a third repeat.

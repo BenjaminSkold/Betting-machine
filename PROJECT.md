@@ -28,154 +28,173 @@ Both the raw confluence score and the edge should be stored and shown — don't 
 
 ## Tech stack
 
-- **Database:** Firestore (Firebase project, free Spark plan — no billing attached).
+**Changed 2026 — read this if you built anything against Firestore before now:** this project moved off Firestore after a live test hit its 1 GiB storage cap and its daily read/write quota during a historical backfill, which caused an unexplained ~2-day project lockout (most likely either the daily quota or a new-project abuse/anomaly hold — never fully confirmed). Firestore is no longer part of this project. If a Firestore setup already exists in this repo, treat it as superseded — the live database is now Turso, and raw trade data goes to Cloudflare R2, not any live database. See "Batching writes" below for why this isn't just a database swap.
+
+**Changed again, same year — a second migration attempt (Firestore → Postgres/Supabase) also hit a wall**, independently, for the same underlying reason: Supabase's free tier caps total database size at 500MB, which a historical backfill blew past, locking the database read-only mid-migration. That attempt is documented in NOTES.md rather than repeated here — the lesson from both failures is the same one this file now builds around: raw trade data cannot live in any single relational/document database's free tier, at any provider, once more than a few weeks of real trading volume exists. Splitting aggregates (small, live-queried) from raw trades (large, rarely queried) across two different systems is the actual fix, not swapping which database holds everything.
+
+- **Live/aggregate database:** Turso (libSQL/SQLite-compatible), free tier — 5 GB storage, 500M row reads/month, 10M row writes/month, no credit card required. Holds the small, frequently-queried data: matches, snapshots, wallet aggregates, confluence scores, paper bets. Does NOT hold raw individual trades — see Data model.
+- **Raw trade archive:** Cloudflare R2 (object storage), free tier — 10 GB storage, 1M write-type operations/month, 10M read-type operations/month, zero egress fees. Enabling R2 requires a card on file even though the free tier itself isn't charged — see "R2 usage guard" below for how this project protects against ever crossing into billed usage. Raw trade data (the couple-million-records-a-season stuff) is written here as batched files, not as database rows.
 - **Frontend/hosting:** Vercel (user already has an account set up).
-- **Scheduled data collection:** a GitHub Action on a cron schedule, calling Polymarket's public APIs and writing into Firestore via the Firebase Admin SDK. This avoids Firebase Cloud Functions, which requires a billing account even though usage itself would stay free.
+- **Scheduled data collection:** a GitHub Action on a cron schedule, calling Polymarket's public APIs and writing into Turso (aggregates) and R2 (raw trade batches). This avoids Firebase Cloud Functions entirely (no billing account needed anywhere in this stack).
 - **Data source:** Polymarket's public, free, unauthenticated read APIs:
   - Gamma API (`https://gamma-api.polymarket.com`) — discover events/markets: `/events`, `/markets`, `/public-search`.
   - CLOB API (`https://clob.polymarket.com`) — prices and history: `/price`, `/prices`, `/book`, `/prices-history`.
-  - Data API (`https://data-api.polymarket.com`) — wallet-level data: `/trades` (supports `?user=<address>` and, worth testing, likely a market filter too), `/positions?user=<address>`, `/activity?user=<address>`.
+  - Data API (`https://data-api.polymarket.com`) — wallet-level data: `/trades` (supports `?user=<address>` and a market filter), `/positions?user=<address>`, `/activity?user=<address>`.
   - All of the above are public/free/no-auth for reading. Rate limits are generous (hundreds of requests per 10 seconds on the endpoints above) — nowhere near a limit at personal-project polling frequency.
-  - **Unverified, test this first:** exactly how far back `/trades` and `/prices-history` go, and roughly how many distinct wallets trade a typical match. Don't assume — make a real call and look.
 
-## Data model (Firestore collections)
+## Data model
+
+Split across two places on purpose — see "Batching writes" for why.
+
+**Turso (live, small, frequently queried) — see `turso/schema.sql` for the actual DDL:**
 
 ```
-matches/{matchId}
-  competition: "EPL" | "UCL" | "UEL" | "UECL"
+matches
+  event_id, competition: "EPL" | "UCL" | "UEL" | "UECL"
   homeTeam, awayTeam
   kickoffTime
   polymarketMarketId
   resolved: boolean
   result: "home" | "draw" | "away" | null
+  homeConditionId, drawConditionId, awayConditionId
+  lastSeenTimestamp, lastSeenKeysAtCursor   // per-market cursor, avoids re-fetching a match's full trade history every poll
+  lastPolledAt                              // adaptive-schedule bookkeeping -- see below
+  tradesBackfilled
 
-matches/{matchId}/snapshots/{snapshotId}
-  capturedAt
-  minutesBeforeKickoff        // e.g. 60, 15, 10 — the checkpoints we're testing
-  prices: { home, draw, away }   // Polymarket implied probabilities at this moment
+snapshots
+  id (autoincrement), matchId
+  capturedAt                  // null for backfilled snapshots -- there was no live "capture" moment
+  minutesBeforeKickoff         // one row per POLL now, not a fixed 60/15/10 set -- see "Adaptive polling schedule"
+  prices: { home, draw, away }
   liquidity
+  backfilled
 
-matches/{matchId}/trades/{tradeId}      // Tier 1: wide, cheap, log everyone
-  wallet
-  side
-  size
-  price
-  timestamp
-
-wallets/{walletAddress}
+wallets
+  address (primary key)
   totalResolvedTrades
   aggregateWinRate            // sample-size-adjusted (shrinkage), not raw
   aggregateROI
   tier: "watch" | "unranked"  // Tier 2 promotion status
-  bySlice: {
-    byCompetition: { EPL: {...}, UCL: {...}, UEL: {...} }
-    byTeam: { "Newcastle United": {...}, ... }
-  }
+  bySlice: { byCompetition: {...}, byTeam: {...}, byMonth: {...} }
+  trend: { early, recent, delta, label }
   lastUpdated
 
-confluenceScores/{scoreId}
-  matchId, snapshotId
+confluenceScores
+  id, matchId, snapshotId
   minutesBeforeKickoff
-  probabilityEstimate         // our estimate, translated from the raw score
-  marketImpliedProbability    // from the matching snapshot's price
-  edge                        // probabilityEstimate - marketImpliedProbability
-  breakdown: { ... }          // which wallets/signals drove this, and how much
+  probabilityEstimate, marketImpliedProbability, edge
+  breakdown: { ... }
   frozenAt
 
-paperBets/{betId}             // the user's own simulated ledger — separate from wallets
-  matchId, scoreId
-  edgeAtBet
-  stake
-  outcome: "win" | "loss" | "pending"
+paperBets
+  id, matchId, scoreId
+  edgeAtBet, stake
+  outcome: "win" | "loss" | "pending" | "void"
   pnl
   placedAt, settledAt
+
+usage_stats                   // R2 usage guard -- see below, not part of the original design
+  metric, period, value
 ```
+
+**Cloudflare R2 (raw trade archive — write-once, rarely read, never held in the live database):**
+
+```
+trades/{matchId}/{pollTimestamp}.json.gz
+  // one batched, compressed file per poll per match — NOT one file/write per trade
+  [ { key, wallet, side, size, price, timestamp, outcome, conditionId }, ... ]
+  // `key` is the trade's natural id (transactionHash_asset_outcomeIndex) --
+  // used to dedupe on read, since R2 and Turso are separate systems with
+  // no shared transaction, so a retry after a partial failure can
+  // legitimately write the same trades twice under two different keys.
+```
+
+Tier 1 logging (below) writes here, in batches. Tier 2's wallet-ranking job reads these files to compute aggregates, then writes only the small resulting aggregate into Turso's `wallets` table — the millions of raw rows never touch the live database at all.
 
 ## Wallet tracking logic (two-tier)
 
-1. **Tier 1 (everyone, cheap):** every trade on every watched market gets logged to `matches/{matchId}/trades`, no filtering, no judgment. This is what makes new-wallet discovery automatic later — nobody has to notice a wallet early by hand.
-2. **Tier 2 (promoted, ranked):** on a schedule (e.g. daily), recompute `wallets/{walletAddress}` for every wallet with enough resolved trades to say anything meaningful (set a minimum, e.g. 8-10 resolved trades). Use a shrinkage-adjusted win rate (pull small-sample wallets toward the overall average, proportional to how small their sample is) so lucky newcomers don't outrank proven ones. Promote to `tier: "watch"` only once both an activity bar and a quality bar are cleared. Compute the same stats sliced `byCompetition` and `byTeam`, with the same shrinkage applied per slice, falling back to the wallet's aggregate number whenever a slice's sample is too small to trust.
-3. **Backfill:** before relying only on live data, pull already-resolved matches from earlier this season (Polymarket's `/trades` reads on-chain history, so this should be possible) so wallets don't all start at zero.
+1. **Tier 1 (everyone, cheap):** every trade on every watched market gets logged — but as **batched files in R2**, not as individual database writes (see "Batching writes"). One file per poll per match, containing every trade seen in that poll, not one write per trade. No filtering, no judgment about which wallets matter yet.
+2. **Tier 2 (promoted, ranked):** on a schedule (daily, plus event-triggered right after each match resolves — see "Recompute on match resolution"), read the relevant R2 trade files and recompute the `wallets` row in Turso for every wallet with enough resolved trades to say anything meaningful (minimum 8-10 resolved trades). Use a shrinkage-adjusted win rate so lucky newcomers don't outrank proven ones. Promote to `tier: "watch"` only once both an activity bar and a quality bar are cleared. Compute the same stats sliced `byCompetition`, `byTeam`, and `byMonth`, falling back to the wallet's aggregate number whenever a slice's sample is too small to trust. Only this small, computed result is written to Turso — the raw trades stay in R2.
+3. **Backfill:** already-resolved matches from earlier this season, pulled straight from Polymarket. **Must be paced deliberately** — see "Batching writes and pacing the backfill" below. This is the step that caused both prior lockouts; don't repeat that mistake against Turso/R2.
 
-## Timing snapshots
+## Batching writes — this is not optional
 
-Don't freeze one score right before kickoff. Take snapshots at multiple checkpoints counting down to kickoff — start with roughly 60, 15, and 10 minutes before, refine to finer granularity later once there's enough data to know it's worth it. Save every snapshot, tagged with `minutesBeforeKickoff`, so which checkpoint is actually best can be analyzed later — that question can't be answered retroactively if the snapshots weren't taken.
+A "write" is one save-operation. What quotas actually count is the number of separate operations, not the total bytes moved — and a single write/insert can carry many records at once. Writing millions of trades as millions of individual one-row-at-a-time writes is exactly what caused both earlier lockouts, and would blow through any provider's quota, free or paid. The rule: **always batch.** Collect everything seen in one polling cycle for one match into a single write (one file to R2) rather than writing record-by-record. This applies everywhere in this project, not just the backfill — live polling too.
+
+**Pacing the backfill specifically:** `backfill.js` processes one bounded batch of matches (default 15) per invocation and exits, run on its own GitHub Actions schedule (every 3 hours) rather than as one long burst — spreading the full historical backfill over roughly a week. It also stops itself early if several matches in a row fail (a circuit breaker), rather than continuing to hammer a possibly-struggling service.
+
+## R2 usage guard
+
+Because enabling R2 required putting a card on file (unlike Turso, which needs none), a self-tracked usage guard exists in `pipeline/src/tradeArchive.js` (and mirrored read-side in the dashboard): before every write, and before every read, it checks a running total kept in Turso's `usage_stats` table against 80% of Cloudflare's published free-tier limits (10GB storage, 1M write-ops/month, 10M read-ops/month) and **throws rather than proceeding** once within that margin. This is deliberately self-tracked rather than relying on Cloudflare's own usage dashboard, so a silent drift into billed usage becomes a loud, immediately-noticed failure instead.
+
+## Visibility into usage
+
+Before building anything custom, check Turso's and Cloudflare's own web dashboards — both show live, accurate read/write/storage usage for free, no code required. The self-tracked `usage_stats` guard above is the automatic backstop; the dashboards are still worth glancing at periodically.
+
+## Adaptive polling schedule
+
+Don't poll every match at a fixed interval regardless of how close it is to kickoff. Ramp up as kickoff approaches, and stop polling entirely once a match ends:
+
+| Time until kickoff | Poll frequency |
+|---|---|
+| Multiple days out | Once a day |
+| ~1 day out | Every 4 hours |
+| Several hours out | Every hour |
+| ~1 hour out | Every 30 minutes, then every 15 |
+| Final hour | Every minute |
+| Final 15 minutes | Every 30 seconds |
+| During the match | Every minute |
+| After the match ends | Stop polling this match entirely |
+
+**Implementation note:** GitHub Actions' cron scheduler can't go below 5 minutes and isn't guaranteed to fire exactly on schedule under load. `collect.js` handles this by looping internally for most of the 5-minute gap between cron ticks, checking each match's own due-time (`pollIntervalMsFor()` + `lastPolledAt`) every ~30 seconds within that loop — the cron tick is a "wake up and stay busy for a while" trigger, not the actual polling clock.
+
+Every poll produces one snapshot (price) and one batched trade file (if any new trades occurred). Don't freeze one confluence score right before kickoff; every snapshot that has meaningfully new data should eventually get its own confluence score, tagged with `minutesBeforeKickoff`, so which checkpoint is actually the best moment to act on can be analyzed later.
+
+## Recompute on match resolution
+
+The moment a match resolves (result known), immediately trigger a Tier 2 recompute for every wallet that traded on it — don't wait for the next scheduled daily run. Implemented as a full re-run of the same daily wallet-ranking computation (not a separate incremental path — a wallet's aggregate stats span its entire trade history, not just the one match, so there's no meaningful shortcut, and reusing the exact same logic can't drift out of sync with the daily job).
 
 ## Milestones
 
-Work through these roughly in order. Each one should be small enough to actually finish and check before starting the next. Below each milestone is a ready-to-paste prompt for a fresh Claude Code session — paste the milestone prompt, and tell that session to read this file (`PROJECT.md`) first.
+Work through these roughly in order. Each one should be small enough to actually finish and check before starting the next.
 
 ---
 
 ### Milestone 1 — Get real Polymarket data flowing
+Goal: prove the data pipeline works before anything depends on it. No scoring, no wallets yet, no UI. *(Done — see NOTES.md.)*
 
-Goal: prove the data pipeline works before anything depends on it. No scoring, no wallets yet, no UI.
-
-> **Prompt:**
-> Read PROJECT.md in this repo for full context. Set up a Node.js (or Python, your choice — pick whichever you're more confident writing clean, well-tested code in) script that:
-> 1. Calls Polymarket's Gamma API to find current and recent EPL, Champions League, and Europa League match markets.
-> 2. For each match found, calls the CLOB API's `/prices-history` to test how far back price history actually goes for one real market, and prints/logs what you find.
-> 3. Calls the Data API's `/trades` endpoint for one real match's market and inspects the response — how many distinct wallets appear, what fields are returned, and whether trades can be filtered by market.
-> 4. Writes a short findings summary back into PROJECT.md (or a new NOTES.md) documenting the real answers to the two "unverified" questions in the Data Model section, so we stop guessing.
-> Do not build Firestore integration yet — this milestone is only about confirming what the Polymarket API actually returns. Keep it a throwaway script, not production code.
-
----
-
-### Milestone 2 — Firestore + scheduled collection
-
-Goal: the pipeline described in "Data model" and "Tech stack" actually running on a schedule, writing real data.
-
-> **Prompt:**
-> Read PROJECT.md for context, including the findings from Milestone 1 (check NOTES.md if it exists). Set up a Firebase project (Firestore, free Spark plan) and the collections described in the Data model section. Write a script that pulls current Polymarket data for EPL/UCL/UEL matches (fixtures, price snapshots, and Tier 1 trade logs — see "Wallet tracking logic") and writes it into Firestore using the Firebase Admin SDK. Then wire this script up to run on a schedule via a GitHub Action (not Firebase Cloud Functions — we're avoiding that specifically to not need a billing account). As part of this same milestone, have the job write a `lastSuccessfulRun` timestamp to Firestore on every successful run (see "Keep it running, not just built") — this isn't optional polish, build it in now. Confirm it runs successfully at least twice on its schedule before considering this done.
-
----
+### Milestone 2 — Turso + R2 + scheduled collection
+Goal: the pipeline described in "Data model" and "Tech stack" actually running on a schedule, writing real data, correctly split between Turso (aggregates) and R2 (raw batched trades). *(Done — see NOTES.md.)*
 
 ### Milestone 3 — Backfill + wallet ranking
-
-Goal: Tier 2 of the wallet logic — turning the raw trade log into an actual ranked watchlist.
-
-> **Prompt:**
-> Read PROJECT.md for full context on the two-tier wallet system. First, write a backfill script that pulls already-resolved matches from earlier this season and logs their historical trades into the same `trades` structure, so wallets don't start with zero history. Then write the Tier 2 job: for every wallet with enough resolved trades, compute a shrinkage-adjusted win rate and ROI, both in aggregate and sliced by competition and by team (falling back to the aggregate number when a slice's sample is too small — pick and document a reasonable minimum sample threshold). Promote qualifying wallets to `tier: "watch"`. Run this as a scheduled job (daily is fine) via GitHub Actions, same pattern as Milestone 2.
-
----
+Goal: Tier 2 of the wallet logic — turning the raw trade log into an actual ranked watchlist. *(Done — see NOTES.md.)*
 
 ### Milestone 4 — The confluence/edge scoring engine
-
-Goal: turn the watchlisted wallets' activity plus price data into the actual score described in "Why edge, not just confidence."
-
-> **Prompt:**
-> Read PROJECT.md, especially the "Why edge, not just confidence" and "Timing snapshots" sections. Write the scoring job: for each upcoming match, at each timing checkpoint (60/15/10 minutes before kickoff to start), compute a simple, transparent weighted score from the watchlisted wallets' current activity on that match, translate it into an estimated probability, compare it against the market-implied probability from the matching price snapshot, and store the result — score, probability estimate, market probability, edge, and a full breakdown of which wallets contributed — in the `confluenceScores` collection, exactly as described in the Data model. Do not use machine learning here; use a documented, simple weighting scheme and write down the weights you chose and why.
-
----
+Goal: turn the watchlisted wallets' activity plus price data into the actual score described in "Why edge, not just confidence." *(Done — see NOTES.md.)*
 
 ### Milestone 5 — The paper-bet simulator (the user's own ledger)
-
-Goal: a simple, separate simulation of "what if I bet whenever the edge crosses a threshold."
-
-> **Prompt:**
-> Read PROJECT.md, especially the "Hard constraints" note that the user's paper ledger is NOT part of the wallet-ranking system and needs its own separate data/presentation. Write a job that, for every frozen confluence score, applies a simple rule (start with: bet a flat stake whenever edge exceeds a threshold, e.g. a meaningful positive edge — make the threshold configurable) and logs the resulting simulated bet into `paperBets`. Once matches resolve, settle those bets (win/loss, pnl) automatically. This should produce enough data to compute a running fake bankroll, win rate, and ROI — but don't build the dashboard for it yet, just get the data itself correct and settling properly.
-
----
+Goal: a simple, separate simulation of "what if I bet whenever the edge crosses a threshold." *(Done — see NOTES.md.)*
 
 ### Milestone 6 — Dashboard (Vercel)
+Goal: a real webpage, but only after everything above is solid.
 
-Goal: a real webpage, but only after everything above is solid. Do not start this early.
-
-> **Prompt:**
-> Read PROJECT.md for full context. Build a Vercel-hosted web app (framework your choice, but something that supports a clean, modern, responsive design working well on both desktop and phone — this matters to the user) that reads from Firestore and shows: a list of upcoming/recent matches with their current confluence score and edge; a per-match detail view with the full score breakdown and price history chart; a wallet leaderboard (tier: "watch" wallets, with aggregate and sliced stats); and a clearly separate "my performance" section showing the paper-bet ledger's running bankroll, win rate, and ROI — kept visually and structurally apart from the wallet leaderboard. Keep the visual design clean and modern but don't over-invest in styling choices yet — the user plans to provide specific design inspiration (sites/URLs) before a final visual pass.
+> Build a Vercel-hosted web app that reads from Turso and R2 and shows: a list of upcoming/recent matches with their current confluence score and edge; a per-match detail view with the full score breakdown and price history chart; a wallet leaderboard (tier: "watch" wallets, with aggregate and sliced stats); and a clearly separate "my performance" section showing the paper-bet ledger's running bankroll, win rate, and ROI. Not yet deployed to Vercel — local only so far.
 
 ---
 
 ## When you're allowed to trust the results
 
-Don't draw conclusions — good or bad — from a small stretch of paper bets. Football is low-scoring and high-variance enough that a genuinely good approach can look bad over a few weeks by chance, and a genuinely bad one can look good. Agree on this now, before results start coming in, so the bar doesn't quietly move once real numbers exist: treat roughly **150-200 settled paper bets, or one full season, whichever comes later,** as the minimum before treating any win rate, ROI, or edge-by-segment finding as real rather than noise. Below that threshold, the dashboard should say so plainly (e.g. "N=32, too early to tell") rather than presenting a confident-looking number. This is also the bar that would eventually matter for any future real-money conversation — not that this build is working toward that, but if the question ever comes up, this is the honest minimum, not a vibe.
+Don't draw conclusions — good or bad — from a small stretch of paper bets. Treat roughly **150-200 settled paper bets, or one full season, whichever comes later,** as the minimum before treating any win rate, ROI, or edge-by-segment finding as real rather than noise. Below that threshold, the dashboard should say so plainly (e.g. "N=32, too early to tell") rather than presenting a confident-looking number.
 
 ## Keep it running, not just built
 
-Scheduled jobs like the ones in Milestones 2 and 3 fail quietly far more often than they fail loudly — an expired API response shape, a renamed field, a GitHub Action that silently stops triggering. Add a basic freshness check from the start: something as simple as a `lastSuccessfulRun` timestamp written to Firestore on every successful job run, and a way to notice if it hasn't updated in longer than expected (even just glancing at it on the dashboard counts, once Milestone 6 exists). Treat this as part of Milestone 2, not a nice-to-have added later — unmaintained cron jobs quietly going stale is one of the most common ways a project like this dies without anyone noticing until months of data are missing.
+Scheduled jobs fail quietly far more often than they fail loudly. `pipeline_status.lastSuccessfulRun` in Turso, updated on every successful `collect.js` run, is the freshness check — the dashboard's matches page shows a stale/fresh indicator from it.
 
 ## Open questions to keep in mind, not blockers
 
-- Exact minimum sample size before trusting a wallet or a slice — start with a reasonable guess (e.g. 8-10 resolved trades) and revisit once real data shows how noisy small samples actually are here.
-- Whether underdog-favoring edge or "meh," roughly-agrees-with-the-market edge turns out to be where the actual paper profit comes from — this is a real open question the user wants answered empirically, not assumed. Once Milestone 5 has real data, segment paper-bet profit by edge size and by favorite-vs-underdog and report back honestly, whichever way it points.
+- Exact minimum sample size before trusting a wallet or a slice — start with a reasonable guess (8-10 resolved trades) and revisit once real data shows how noisy small samples actually are here.
+- Whether underdog-favoring edge or "meh," roughly-agrees-with-the-market edge turns out to be where the actual paper profit comes from — a real open question, to be answered empirically once Milestone 5 has real settled-bet data.
+- Whether a wallet's per-team/per-competition edge reflects genuine skill or just fandom-driven volume with good luck — no clean way to distinguish from trade data alone; worth watching once more slices have real volume.
 - Conference League as an optional side dataset — nice to have, never required, never mixed into the main analysis.
+- Deeper historical backfill (multiple past EPL seasons) is feasible for EPL specifically; UCL/UEL have real data-availability limits going back more than one season (Polymarket's series ids only cover partial knockout-round history further back).
+- Multi-platform expansion (bet365, Stake, etc.) needs its own design conversation before assuming it's a simple "add another source" — those platforms don't expose any wallet-level/per-bettor data the way Polymarket's on-chain trades do, so the "follow smart wallets" mechanism doesn't translate directly.

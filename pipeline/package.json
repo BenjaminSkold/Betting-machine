@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Polymarket data collection + backfill jobs for the Confluence project. Writes into Supabase (Postgres). Run via GitHub Actions cron.",
+  "description": "Polymarket data collection + backfill jobs for the Confluence project. Aggregates go to Turso, raw trades to Cloudflare R2. Run via GitHub Actions cron.",
   "scripts": {
     "check-connection": "node src/checkConnection.js",
     "collect": "node src/collect.js",
@@ -14,7 +14,8 @@
     "test": "node src/polymarket.test.js && node src/collect.test.js && node src/rankWallets.test.js && node src/scoreMatches.test.js && node src/paperBets.test.js"
   },
   "dependencies": {
-    "dotenv": "^16.4.5",
-    "pg": "^8.13.1"
+    "@aws-sdk/client-s3": "^3.687.0",
+    "@libsql/client": "^0.14.0",
+    "dotenv": "^16.4.5"
   }
 }

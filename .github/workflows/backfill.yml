@@ -1,12 +1,17 @@
-name: Rank wallets
+name: Backfill historical matches
 
 on:
+  # Deliberately infrequent -- see PROJECT.md's "Batching writes and pacing
+  # the backfill." backfill.js processes one bounded batch (default 15
+  # matches) per invocation and exits; running every 3 hours spreads the
+  # full ~892-match historical backfill over roughly a week instead of one
+  # burst against freshly-created Turso/R2 accounts.
   schedule:
-    - cron: "0 4 * * *" # daily, off-peak — per PROJECT.md, "daily is fine" for Tier 2 (also triggered immediately on match resolution, see recompute.js)
+    - cron: "0 */3 * * *"
   workflow_dispatch: {}
 
 jobs:
-  rank-wallets:
+  backfill:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -22,7 +27,7 @@ jobs:
 
       - run: npm ci
 
-      - run: node src/rankWallets.js
+      - run: node src/backfill.js
         env:
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}

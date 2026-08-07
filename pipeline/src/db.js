@@ -1,124 +1,96 @@
-// Postgres (Supabase) connection pool. Replaces firestoreRest.js.
-//
-// Firestore's REST client needed hand-rolled auth, request pacing, and
-// 429 backoff because Firestore itself rate-limited sustained request
-// volume. None of that applies here: `pg` pools connections and the
-// Supabase pooler has no comparable per-request quota, so this is just a
-// singleton Pool. Callers write plain SQL against it directly.
+// Turso (libSQL) client. Replaces the Postgres pool from the abandoned
+// Supabase attempt. Raw trades are never queried here -- see
+// tradeArchive.js for R2.
 import "dotenv/config";
-import pg from "pg";
-import { tradeKey } from "./polymarket.js";
+import { createClient } from "@libsql/client";
 
-const { Pool, types } = pg;
-
-// node-postgres returns NUMERIC and INT8 (bigint) columns as strings by
-// default, to avoid silently losing precision beyond what JS numbers can
-// represent exactly. This project's numeric columns (trade size/price,
-// scores, etc.) came from Firestore, where every number was already an
-// IEEE double -- there's no extra precision to protect here, and leaving
-// them as strings is actively dangerous: `totalVolume += trade.size` would
-// silently do string concatenation instead of addition. Parse both back to
-// JS numbers globally instead of hunting down every arithmetic call site.
-// Trade timestamps (unix seconds) are the only INT8 column and are nowhere
-// near Number.MAX_SAFE_INTEGER, so parseInt is safe here specifically.
-types.setTypeParser(1700 /* NUMERIC */, (val) => (val === null ? null : parseFloat(val)));
-types.setTypeParser(20 /* INT8 */, (val) => (val === null ? null : parseInt(val, 10)));
-
-let pool;
-export function getPool() {
-  if (!pool) {
-    const connectionString = process.env.SUPABASE_DB_URL;
-    if (!connectionString) {
-      throw new Error("SUPABASE_DB_URL is not set (see pipeline/.env locally, or the GitHub Actions secret in CI).");
+let client;
+export function getClient() {
+  if (!client) {
+    const url = process.env.TURSO_DATABASE_URL;
+    const authToken = process.env.TURSO_AUTH_TOKEN;
+    if (!url) {
+      throw new Error("TURSO_DATABASE_URL is not set (see pipeline/.env locally, or the GitHub Actions secret in CI).");
     }
-    pool = new Pool({ connectionString });
+    client = createClient({ url, authToken });
   }
-  return pool;
+  return client;
 }
 
-export async function withTransaction(pool, fn) {
-  const client = await pool.connect();
+// SQLite has no native boolean -- convert JS booleans to 0/1 at the
+// boundary. Other JS values pass through unchanged (libSQL's client
+// already handles numbers/strings/null natively).
+function toSqliteValue(v) {
+  if (typeof v === "boolean") return v ? 1 : 0;
+  return v;
+}
+
+// A live smoke test caught a real bug this exists to prevent: backfill.js
+// used to call upsertMatch(..., {trades_backfilled: true}) BEFORE writing
+// that match's snapshots, so a failure in between left the match
+// permanently marked done with no snapshots ever written -- silently
+// skipped forever on every future run. Wrapping the "mark as processed"
+// write together with its snapshot writes means a mid-match failure rolls
+// back cleanly and the next run retries the whole match, not half of it.
+// `fn` receives a transaction object with the same `.execute()` shape as
+// the regular client, so upsertMatch/insertSnapshot work unchanged with it.
+export async function withTransaction(client, fn) {
+  const tx = await client.transaction("write");
   try {
-    await client.query("BEGIN");
-    const result = await fn(client);
-    await client.query("COMMIT");
+    const result = await fn(tx);
+    await tx.commit();
     return result;
   } catch (err) {
-    await client.query("ROLLBACK");
+    await tx.rollback();
     throw err;
-  } finally {
-    client.release();
   }
 }
 
 export async function getMatchRow(client, eventId) {
-  const { rows } = await client.query("SELECT * FROM matches WHERE event_id = $1", [eventId]);
+  const { rows } = await client.execute({ sql: "SELECT * FROM matches WHERE event_id = ?", args: [eventId] });
   return rows[0] || null;
 }
 
 // `fields` uses the table's own snake_case column names directly -- this is
 // trusted, application-defined data (never user input), so building the
-// column/placeholder lists from Object.keys is safe. jsonb fields must be
-// pre-stringified by the caller.
+// column/placeholder lists from Object.keys is safe. JSON-shaped fields
+// must be pre-stringified by the caller.
 export async function upsertMatch(client, eventId, fields) {
-  const cols = Object.keys(fields);
-  const values = Object.values(fields);
-  const setClause = cols.map((c) => `${c} = EXCLUDED.${c}`).join(", ");
+  // updated_at is set here, not by callers -- it was forgotten at every
+  // call site once (matches.updated_at is NOT NULL with no SQL-side
+  // default, since SQLite's CURRENT_TIMESTAMP formats differently than the
+  // ISO strings used everywhere else), which failed every single upsert
+  // until caught by a live smoke test. Centralizing it means it can't be
+  // forgotten again.
+  const allFields = { ...fields, updated_at: new Date().toISOString() };
+  const cols = Object.keys(allFields);
+  const values = cols.map((c) => toSqliteValue(allFields[c]));
+  const setClause = cols.map((c) => `${c} = excluded.${c}`).join(", ");
   const colList = ["event_id", ...cols].join(", ");
-  const placeholders = cols.map((_, i) => `$${i + 2}`);
-  await client.query(
-    `INSERT INTO matches (${colList}) VALUES ($1, ${placeholders.join(", ")})
-     ON CONFLICT (event_id) DO UPDATE SET ${setClause}, updated_at = now()`,
-    [eventId, ...values]
-  );
+  const placeholders = cols.map(() => "?").join(", ");
+  await client.execute({
+    sql: `INSERT INTO matches (${colList}) VALUES (?, ${placeholders})
+          ON CONFLICT(event_id) DO UPDATE SET ${setClause}`,
+    args: [eventId, ...values],
+  });
 }
 
-export async function getExistingSnapshotCheckpoints(client, matchId) {
-  const { rows } = await client.query("SELECT checkpoint FROM snapshots WHERE match_id = $1", [matchId]);
-  return new Set(rows.map((r) => r.checkpoint));
-}
-
-export async function insertSnapshot(client, matchId, checkpoint, data) {
-  await client.query(
-    `INSERT INTO snapshots (match_id, checkpoint, captured_at, minutes_before_kickoff, price_home, price_draw, price_away, liquidity, backfilled)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-     ON CONFLICT (match_id, checkpoint) DO NOTHING`,
-    [
+// Snapshots are append-only (one row per poll, not upserted into a fixed
+// set of checkpoints) -- the adaptive polling schedule means the number of
+// snapshots per match varies, so there's nothing to check for existence.
+export async function insertSnapshot(client, matchId, data) {
+  await client.execute({
+    sql: `INSERT INTO snapshots (match_id, captured_at, minutes_before_kickoff, price_home, price_draw, price_away, liquidity, backfilled)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [
       matchId,
-      String(checkpoint),
       data.capturedAt,
       data.minutesBeforeKickoff,
       data.prices.home,
       data.prices.draw,
       data.prices.away,
       data.liquidity,
-      Boolean(data.backfilled),
-    ]
-  );
-}
-
-const TRADE_INSERT_CHUNK = 500;
-const TRADE_COLS = ["id", "match_id", "condition_id", "wallet", "side", "size", "price", "timestamp", "outcome"];
-
-// Trade rows are keyed by the same natural id Firestore used
-// (transactionHash_asset_outcomeIndex) with ON CONFLICT DO NOTHING, so
-// re-inserting trades the cursor already accounted for is a harmless no-op.
-// That makes this naturally idempotent against a crash between inserting
-// trades and updating the match's cursor -- unlike Firestore, correctness
-// here doesn't depend on both landing in the same atomic write.
-export async function insertTrades(client, matchId, trades) {
-  for (let i = 0; i < trades.length; i += TRADE_INSERT_CHUNK) {
-    const group = trades.slice(i, i + TRADE_INSERT_CHUNK);
-    const values = [];
-    const params = [];
-    group.forEach((t, idx) => {
-      const base = idx * TRADE_COLS.length;
-      values.push(`(${TRADE_COLS.map((_, j) => `$${base + j + 1}`).join(", ")})`);
-      params.push(tradeKey(t), matchId, t.conditionId, t.proxyWallet, t.side, t.size, t.price, t.timestamp, t.outcome);
-    });
-    await client.query(
-      `INSERT INTO trades (${TRADE_COLS.join(", ")}) VALUES ${values.join(", ")} ON CONFLICT (id) DO NOTHING`,
-      params
-    );
-  }
+      toSqliteValue(Boolean(data.backfilled)),
+    ],
+  });
 }

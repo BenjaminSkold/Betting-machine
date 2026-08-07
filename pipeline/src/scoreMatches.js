@@ -4,8 +4,13 @@
 // and compares it against the market's own price at that checkpoint. No
 // ML — see the "Weighting scheme, and why" comment block below for the
 // full, documented formula. Read PROJECT.md's "Why edge, not just
-// confidence" and "Timing snapshots" sections before changing this.
-import { getPool } from "./db.js";
+// confidence" and "Adaptive polling schedule" sections before changing this.
+//
+// Under the adaptive schedule, snapshots are append-only (one per poll,
+// not a fixed set of 60/15/10-min checkpoints) -- so every not-yet-scored
+// snapshot gets its own confluence score, not just three per match.
+import { getClient } from "./db.js";
+import { readAllTradesForMatch } from "./tradeArchive.js";
 import { isMainModule } from "./isMain.js";
 
 // How far smart-wallet signal is allowed to move our probability estimate
@@ -21,9 +26,7 @@ const MAX_SHIFT = 0.15;
 const MAX_SKILL_WEIGHT = 0.5;
 
 // Buying "Yes" or selling "No" both mean betting a leg WILL happen; buying
-// "No" or selling "Yes" both mean betting AGAINST it. This is the same
-// direction convention as rankWallets.js's win/loss check, just phrased as
-// "which way is this trade betting" instead of "did this trade win".
+// "No" or selling "Yes" both mean betting AGAINST it.
 function direction(trade) {
   const betsFor = (trade.outcome === "Yes") === (trade.side === "BUY");
   return betsFor ? 1 : -1;
@@ -47,22 +50,15 @@ function clip(x, lo, hi) {
  * 1. For each leg (home/draw/away), sum `size * (winRate - 0.5) * direction`
  *    across every watchlisted wallet's trade on that leg. A big, one-sided,
  *    skilled-wallet position produces a big signal; a small or contested
- *    one produces a signal near zero. This is the "raw confluence" —
- *    literally just a weighted vote, no fitting involved.
+ *    one produces a signal near zero.
  * 2. Normalize each leg's signal by the match's TOTAL watchlisted volume
  *    (not that leg's own volume) so a leg with only a little watchlisted
- *    money doesn't look artificially overconfident just because whatever
- *    little volume it has happens to agree. `score` in the output is this
- *    normalized number for whichever leg ends up tracked.
+ *    money doesn't look artificially overconfident.
  * 3. Translate to a probability by nudging the market's own price for that
- *    leg by `MAX_SHIFT * (normalizedSignal / MAX_SKILL_WEIGHT)` — i.e. the
- *    nudge scales linearly from 0 up to ±MAX_SHIFT at maximum signal — then
- *    clip and renormalize the three legs back to summing to 1.
- * 4. The leg reported at the top level (probabilityEstimate/edge/etc.) is
- *    whichever of the three has the largest |edge| — that's the leg that
- *    would actually be worth a paper bet, per "Why edge, not just
- *    confidence". All three legs' numbers are kept in `breakdown` either
- *    way, since the confidence score must always show its breakdown.
+ *    leg by `MAX_SHIFT * (normalizedSignal / MAX_SKILL_WEIGHT)`, then clip
+ *    and renormalize the three legs back to summing to 1.
+ * 4. The leg reported at the top level is whichever of the three has the
+ *    largest |edge| — the one that would actually be worth a paper bet.
  */
 export function computeMatchScore(trades, walletsByAddress, marketPrices, marketConditionIds) {
   const watchlisted = trades.filter((t) => walletsByAddress.get(t.wallet)?.tier === "watch");
@@ -93,11 +89,8 @@ export function computeMatchScore(trades, walletsByAddress, marketPrices, market
     const marketPrice = marketPrices[leg];
     const shift = MAX_SHIFT * (normalizedSignal / MAX_SKILL_WEIGHT);
     // With zero signal (shift === 0), pass the market price through
-    // unclipped. Clipping unconditionally to [0.01, 0.99] used to move a
-    // lopsided-but-legitimate market price (e.g. 0.995 on a near-certain
-    // favorite) even with no watchlisted activity at all, manufacturing a
-    // nonzero "edge" purely from the clip bounds — found by an independent
-    // code review. A system with no signal must report no edge.
+    // unclipped — a system with no signal must report no edge, not a clip
+    // artifact from a lopsided-but-legitimate favorite.
     const rawEstimate =
       marketPrice === null || marketPrice === undefined ? null : shift === 0 ? marketPrice : clip(marketPrice + shift, 0.01, 0.99);
 
@@ -111,8 +104,6 @@ export function computeMatchScore(trades, walletsByAddress, marketPrices, market
     };
   }
 
-  // Renormalize the three raw estimates so they sum to 1, same as the
-  // market's own prices do.
   const rawTotal = ["home", "draw", "away"].reduce((sum, leg) => sum + (breakdown[leg].rawEstimate ?? 0), 0);
   for (const leg of ["home", "draw", "away"]) {
     const b = breakdown[leg];
@@ -136,69 +127,58 @@ export function computeMatchScore(trades, walletsByAddress, marketPrices, market
   };
 }
 
-async function loadWatchlistedWallets(pool) {
-  const { rows } = await pool.query(`SELECT address, tier, aggregate_win_rate AS "aggregateWinRate" FROM wallets`);
+async function loadWatchlistedWallets(client) {
+  const { rows } = await client.execute(`SELECT address, tier, aggregate_win_rate AS "aggregateWinRate" FROM wallets`);
   const map = new Map();
   for (const r of rows) map.set(r.address, r);
   return map;
 }
 
-// Normalizes every not-yet-resolved match with a determined market
-// (home/draw/away condition ids known) into
-// {id, homeTeam, awayTeam, kickoffTime, marketConditionIds, snapshots, trades}
-// via three indexed queries (matches/snapshots/trades), instead of
-// Firestore's per-match `list()` scans that used to blow the read quota.
-async function loadUpcomingMatches(pool) {
-  const { rows: matchRows } = await pool.query(
+// Normalizes every not-yet-resolved match with a determined market into
+// {id, homeTeam, awayTeam, kickoffTime, marketConditionIds, snapshots, trades}.
+// Snapshots come from Turso (one row per poll); trades come from R2.
+async function loadUpcomingMatches(client) {
+  const { rows: matchRows } = await client.execute(
     `SELECT event_id AS "id", home_team AS "homeTeam", away_team AS "awayTeam", kickoff_time AS "kickoffTime",
             home_condition_id AS "home", draw_condition_id AS "draw", away_condition_id AS "away"
      FROM matches
-     WHERE resolved = false AND home_condition_id IS NOT NULL AND draw_condition_id IS NOT NULL AND away_condition_id IS NOT NULL`
+     WHERE resolved = 0 AND home_condition_id IS NOT NULL AND draw_condition_id IS NOT NULL AND away_condition_id IS NOT NULL`
   );
   if (matchRows.length === 0) return [];
 
-  const matchIds = matchRows.map((m) => m.id);
-  const { rows: snapshotRows } = await pool.query(
-    `SELECT match_id AS "matchId", checkpoint AS "id", minutes_before_kickoff AS "minutesBeforeKickoff",
-            price_home AS "home", price_draw AS "draw", price_away AS "away"
-     FROM snapshots WHERE match_id = ANY($1)`,
-    [matchIds]
-  );
-  const { rows: tradeRows } = await pool.query(
-    `SELECT match_id AS "matchId", wallet, side, size, price, timestamp, outcome, condition_id AS "conditionId"
-     FROM trades WHERE match_id = ANY($1)`,
-    [matchIds]
-  );
+  const matches = [];
+  for (const m of matchRows) {
+    const { rows: snapshotRows } = await client.execute({
+      sql: `SELECT id, minutes_before_kickoff AS "minutesBeforeKickoff", price_home AS "home", price_draw AS "draw", price_away AS "away"
+            FROM snapshots WHERE match_id = ?`,
+      args: [m.id],
+    });
+    if (snapshotRows.length === 0) continue;
 
-  const snapshotsByMatch = new Map();
-  for (const s of snapshotRows) {
-    if (!snapshotsByMatch.has(s.matchId)) snapshotsByMatch.set(s.matchId, []);
-    snapshotsByMatch.get(s.matchId).push({ id: s.id, minutesBeforeKickoff: s.minutesBeforeKickoff, prices: { home: s.home, draw: s.draw, away: s.away } });
-  }
-  const tradesByMatch = new Map();
-  for (const t of tradeRows) {
-    if (!tradesByMatch.has(t.matchId)) tradesByMatch.set(t.matchId, []);
-    tradesByMatch.get(t.matchId).push(t);
-  }
-
-  return matchRows
-    .map((m) => ({
+    const trades = await readAllTradesForMatch(client, m.id);
+    matches.push({
       id: m.id,
       homeTeam: m.homeTeam,
       awayTeam: m.awayTeam,
       kickoffTime: m.kickoffTime,
       marketConditionIds: { home: m.home, draw: m.draw, away: m.away },
-      snapshots: snapshotsByMatch.get(m.id) || [],
-      trades: tradesByMatch.get(m.id) || [],
-    }))
-    .filter((m) => m.snapshots.length > 0);
+      snapshots: snapshotRows.map((s) => ({
+        id: String(s.id),
+        minutesBeforeKickoff: s.minutesBeforeKickoff,
+        prices: { home: s.home, draw: s.draw, away: s.away },
+      })),
+      trades,
+    });
+  }
+  return matches;
 }
 
-// Scores every not-yet-frozen checkpoint for one normalized match, writing
+// Scores every not-yet-frozen snapshot for one normalized match, writing
 // each new confluence_scores row.
-async function scoreMatch(pool, match, walletsByAddress) {
+async function scoreMatch(client, match, walletsByAddress) {
   const scoreIds = match.snapshots.map((s) => `${match.id}_${s.id}`);
-  const { rows: existingRows } = await pool.query(`SELECT id FROM confluence_scores WHERE id = ANY($1)`, [scoreIds]);
+  const placeholders = scoreIds.map(() => "?").join(", ");
+  const { rows: existingRows } = await client.execute({ sql: `SELECT id FROM confluence_scores WHERE id IN (${placeholders})`, args: scoreIds });
   const existing = new Set(existingRows.map((r) => r.id));
 
   let scored = 0;
@@ -208,20 +188,18 @@ async function scoreMatch(pool, match, walletsByAddress) {
     if (existing.has(scoreId)) continue;
 
     // Only trades that happened at-or-before this checkpoint — otherwise a
-    // score computed for "60 min before kickoff" would be leaking in trades
-    // that actually happened later, which would make the 60/15/10
-    // checkpoint comparison Milestone 4 exists to enable meaningless.
+    // score would leak in trades that actually happened later.
     const checkpointMs = kickoffMs - snapshot.minutesBeforeKickoff * 60 * 1000;
     const tradesSoFar = match.trades.filter((t) => t.timestamp * 1000 <= checkpointMs);
 
     const result = computeMatchScore(tradesSoFar, walletsByAddress, snapshot.prices, match.marketConditionIds);
     if (!result) continue;
 
-    await pool.query(
-      `INSERT INTO confluence_scores (id, match_id, snapshot_id, minutes_before_kickoff, tracked_leg, score, probability_estimate, market_implied_probability, edge, breakdown, frozen_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
-       ON CONFLICT (id) DO NOTHING`,
-      [
+    await client.execute({
+      sql: `INSERT INTO confluence_scores (id, match_id, snapshot_id, minutes_before_kickoff, tracked_leg, score, probability_estimate, market_implied_probability, edge, breakdown, frozen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO NOTHING`,
+      args: [
         scoreId,
         match.id,
         snapshot.id,
@@ -232,11 +210,12 @@ async function scoreMatch(pool, match, walletsByAddress) {
         result.marketImpliedProbability,
         result.edge,
         JSON.stringify(result.breakdown),
-      ]
-    );
+        new Date().toISOString(),
+      ],
+    });
     scored++;
     console.log(
-      `  ${match.homeTeam} vs. ${match.awayTeam} @ ${snapshot.minutesBeforeKickoff}min: ` +
+      `  ${match.homeTeam} vs. ${match.awayTeam} @ ${snapshot.minutesBeforeKickoff.toFixed(0)}min: ` +
         `tracked=${result.trackedLeg} edge=${(result.edge * 100).toFixed(1)}pp`
     );
   }
@@ -244,26 +223,24 @@ async function scoreMatch(pool, match, walletsByAddress) {
 }
 
 async function main() {
-  const pool = getPool();
-  const walletsByAddress = await loadWatchlistedWallets(pool);
+  const client = getClient();
+  const walletsByAddress = await loadWatchlistedWallets(client);
   const watchCount = [...walletsByAddress.values()].filter((w) => w.tier === "watch").length;
   console.log(`${walletsByAddress.size} wallet(s) loaded, ${watchCount} on tier:"watch".`);
   if (watchCount === 0) {
     console.log("No watchlisted wallets yet — nothing to score. Run rankWallets.js once there's trade history.");
-    await pool.end();
     return;
   }
 
   console.log("Loading upcoming matches...");
-  const matches = await loadUpcomingMatches(pool);
+  const matches = await loadUpcomingMatches(client);
 
   let scored = 0;
   for (const match of matches) {
-    scored += await scoreMatch(pool, match, walletsByAddress);
+    scored += await scoreMatch(client, match, walletsByAddress);
   }
 
   console.log(`\nDone. ${scored} new confluence score(s) written.`);
-  await pool.end();
 }
 
 if (isMainModule(import.meta.url)) {

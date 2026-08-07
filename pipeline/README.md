@@ -1,29 +1,29 @@
 # Confluence pipeline
 
-Node.js scripts that pull Polymarket data and read/write Supabase (Postgres) for the Confluence project — see `../PROJECT.md` for what this is and why, `../NOTES.md` for the real bugs found and fixed while building this and the reasoning behind every non-obvious choice below.
+Node.js scripts that pull Polymarket data and write aggregates to Turso + raw trades to Cloudflare R2 for the Confluence project — see `../PROJECT.md` for what this is and why, `../NOTES.md` for the real bugs found and fixed while building this and the reasoning behind every non-obvious choice below.
 
 ## Scripts
 
 | Script | Milestone | What it does | Schedule |
 |---|---|---|---|
-| `src/collect.js` | 2 | Discovers live EPL/UCL/UEL matches, writes price snapshots at the 60/15/10-min checkpoints, logs new Tier 1 trades, updates `pipeline_status.last_successful_run` | every 15 min (GitHub Actions) |
-| `src/backfill.js` | 3 | One-time backfill of last season's matches + trades for EPL/UCL/UEL, resumable | manual (`npm run backfill`) |
-| `src/rankWallets.js` | 3 (Tier 2) | Shrinkage-adjusted win rate/ROI per wallet, sliced by competition/team, promotes to `tier:"watch"` | daily (GitHub Actions) |
-| `src/scoreMatches.js` | 4 | Confluence/edge score per match per checkpoint, from watchlisted wallets' activity | every 15 min, after `collect.js` |
-| `src/paperBets.js` | 5 | Places/settles the user's own flat-stake paper bets against frozen scores | every 15 min, after `scoreMatches.js` |
+| `src/collect.js` | 2 | Discovers live EPL/UCL/UEL matches, polls each one at the adaptive schedule's current cadence, writes a price snapshot to Turso and any new trades to R2, updates `pipeline_status.last_successful_run` | every 5 min (GitHub Actions; loops internally to hit tighter cadences — see PROJECT.md's "Adaptive polling schedule") |
+| `src/backfill.js` | 3 | Historical backfill of last season's matches + trades for EPL/UCL/UEL, one bounded batch per run, resumable | every 3 hours (GitHub Actions) |
+| `src/rankWallets.js` | 3 (Tier 2) | Reads resolved matches' trades from R2, computes shrinkage-adjusted win rate/ROI per wallet, writes only the summary to Turso, promotes to `tier:"watch"` | daily (GitHub Actions), plus immediately on match resolution (`recompute.js`) |
+| `src/scoreMatches.js` | 4 | Confluence/edge score per match per snapshot, from watchlisted wallets' activity | every 5 min, after `collect.js` |
+| `src/paperBets.js` | 5 | Places/settles the user's own flat-stake paper bets against frozen scores | every 5 min, after `scoreMatches.js` |
 
-Run any of them locally with `SUPABASE_DB_URL=postgresql://... node src/<script>.js` (or drop it in `pipeline/.env`, loaded automatically via `dotenv`). `npm test` runs the `*.test.js` files (synthetic, hand-worked expected values — no database access needed).
+Run any of them locally with `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN`/`R2_*` set (or drop them in `pipeline/.env`, loaded automatically via `dotenv`). `npm test` runs the `*.test.js` files (synthetic, hand-worked expected values — no live database/R2 access needed).
 
-## Why Postgres, not Firestore
+## Why Turso + R2, not one database
 
-This project originally ran on Firestore. It hit two compounding problems there: a write-rate ceiling far below documented free-tier quotas (`RESOURCE_EXHAUSTED` after ~10 matches' worth of per-trade writes), and later a comparable read-quota wall once `rankWallets.js`/`scoreMatches.js` needed to scan the full `matches` collection every run. Both problems are specific to Firestore's request-based quota model — Postgres has no equivalent per-request throttle, so the migration also let several Firestore-specific workarounds get deleted outright rather than ported: trade array-batching (`tradeBatches.js`), the straight-from-Polymarket read-quota bypass in `rankWallets.js`/`scoreMatches.js` (and their local resume caches), and the one-wallet-at-a-time paced writes. See `../NOTES.md` for the full history of what was actually hit and when.
+This project tried Firestore, then Postgres/Supabase, and hit the same underlying wall both times: raw trade data (millions of rows a season) doesn't fit in any single relational/document database's free tier once real volume exists, regardless of provider. See `../NOTES.md` for the full history of both lockouts. The fix here isn't a third database swap — it's splitting the data by access pattern: **Turso** holds the small, frequently-queried aggregates (matches, snapshots, wallets, scores, bets); **Cloudflare R2** holds the large, rarely-read raw trade archive as gzipped batch files, never as database rows. Nothing crosses from R2 back into a database except the tiny computed results `rankWallets.js` writes.
 
-`src/db.js` is a thin wrapper around `pg` (node-postgres) — a real client library, not a hand-rolled REST client like Firestore needed. One thing it does set globally: node-postgres returns `NUMERIC`/`BIGINT` columns as strings by default, which would silently break plain `+=` arithmetic elsewhere in this codebase, so `db.js` registers type parsers to get plain JS numbers back.
+`src/db.js` wraps `@libsql/client`. `src/tradeArchive.js` wraps `@aws-sdk/client-s3` (R2 is S3-compatible) and includes a self-tracked usage guard — see PROJECT.md's "R2 usage guard" for why (enabling R2 required a card on file, unlike Turso).
 
 ## Schema
 
-Table definitions live in `../supabase/migrations/`. Trades are one row per trade (`trades`, keyed by `{transactionHash}_{asset}_{outcomeIndex}`, same natural key Firestore used) — no batching needed once Firestore's write-quota constraint was gone.
+Table definitions live in `../turso/schema.sql`. Snapshots are append-only (one row per poll, not a fixed 60/15/10 set) under the adaptive schedule. Trades never appear in Turso at all — they're batched files in R2, keyed `trades/{matchId}/{pollTimestamp}.json.gz`, each trade carrying its natural id (`key`, from `tradeKey()`) so `readAllTradesForMatch` can dedupe if a retry ever wrote the same trades twice under different keys (R2 and Turso have no shared transaction, so this is possible in a narrow failure window — see NOTES.md).
 
 ## Resumability
 
-`backfill.js` is safe to kill and rerun at any point — it checks `trades_backfilled` and that condition ids are populated on each match before doing any work, and retries a failing match with cooldown (5/10/15s) before giving up on it and moving to the next (logged at the end so you know what to rerun). `collect.js` keeps a per-market `last_seen_timestamp` cursor so a rerun only fetches genuinely new trades, not a match's full history every 15 minutes — and since trade rows upsert on a natural id (`ON CONFLICT DO NOTHING`), a crash between inserting trades and updating that cursor just means the same (already-stored) trades get harmlessly re-fetched and no-op'd next run, not double-counted.
+`backfill.js` processes one bounded batch (default 15 matches) per invocation, checks `trades_backfilled` + condition ids before doing any work on a match, and stops itself early after a few consecutive failures rather than hammering a struggling service. Marking a match "backfilled" happens in the same Turso transaction as writing its snapshots (`withTransaction` in `db.js`) — a live bug once let a mid-match failure mark a match done with zero snapshots ever written, silently skipped forever after; this is what fixed it. `collect.js` keeps a per-market `lastSeenTimestamp` cursor so a rerun only fetches genuinely new trades, not a match's full history every poll.

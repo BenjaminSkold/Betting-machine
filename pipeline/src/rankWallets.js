@@ -4,7 +4,8 @@
 // before changing the thresholds below — they're deliberately simple,
 // documented guesses meant to be revisited once real data exists, not
 // tuned constants.
-import { getPool } from "./db.js";
+import { getClient } from "./db.js";
+import { readAllTradesForMatch } from "./tradeArchive.js";
 import { isMainModule } from "./isMain.js";
 
 // "Enough resolved trades to say anything meaningful" — PROJECT.md's own
@@ -57,40 +58,60 @@ function legFor(trade, match) {
   return null;
 }
 
-// Postgres has server-side WHERE filtering, so this is one indexed query
-// per table instead of Firestore's full-collection `list()` scans (which is
-// what used to blow the read quota and required the whole
-// straight-from-Polymarket bypass this file no longer has).
-async function loadResolvedMatchesWithTrades(pool) {
-  const { rows: matchRows } = await pool.query(
+// Reads every resolved match's condition ids from Turso, then reads and
+// flattens that match's batched trade files from R2. This is the same
+// full-rescan-every-run shape the old SQL version had (just against R2
+// instead of a trades table) -- fine at today's scale (well within R2's
+// free read quota even run daily), worth revisiting only if match count
+// grows by an order of magnitude (many more seasons/platforms).
+async function loadResolvedMatchesWithTrades(client) {
+  const { rows: matchRows } = await client.execute(
     `SELECT event_id AS "id", competition, home_team AS "homeTeam", away_team AS "awayTeam", result,
             home_condition_id AS "home", draw_condition_id AS "draw", away_condition_id AS "away"
      FROM matches
-     WHERE resolved = true AND result IS NOT NULL
+     WHERE resolved = 1 AND result IS NOT NULL
        AND home_condition_id IS NOT NULL AND draw_condition_id IS NOT NULL AND away_condition_id IS NOT NULL`
   );
-  const { rows: tradeRows } = await pool.query(
-    `SELECT t.match_id AS "matchId", t.wallet, t.side, t.size, t.price, t.timestamp, t.outcome, t.condition_id AS "conditionId"
-     FROM trades t
-     JOIN matches m ON m.event_id = t.match_id
-     WHERE m.resolved = true AND m.result IS NOT NULL`
-  );
 
-  const tradesByMatch = new Map();
-  for (const t of tradeRows) {
-    if (!tradesByMatch.has(t.matchId)) tradesByMatch.set(t.matchId, []);
-    tradesByMatch.get(t.matchId).push(t);
+  const matches = [];
+  for (const m of matchRows) {
+    const trades = await readAllTradesForMatch(client, m.id);
+    matches.push({
+      id: m.id,
+      competition: m.competition,
+      homeTeam: m.homeTeam,
+      awayTeam: m.awayTeam,
+      result: m.result,
+      marketConditionIds: { home: m.home, draw: m.draw, away: m.away },
+      trades,
+    });
   }
+  return matches;
+}
 
-  return matchRows.map((m) => ({
+// Same as loadResolvedMatchesWithTrades, but for exactly one match --
+// used by the match-resolution-triggered recompute (recompute.js) so it
+// doesn't have to rescan every resolved match just to update the handful
+// of wallets that traded on the one that just finished.
+export async function loadOneResolvedMatchWithTrades(client, matchId) {
+  const { rows } = await client.execute({
+    sql: `SELECT event_id AS "id", competition, home_team AS "homeTeam", away_team AS "awayTeam", result,
+                 home_condition_id AS "home", draw_condition_id AS "draw", away_condition_id AS "away"
+          FROM matches WHERE event_id = ? AND resolved = 1 AND result IS NOT NULL`,
+    args: [matchId],
+  });
+  if (rows.length === 0) return null;
+  const m = rows[0];
+  const trades = await readAllTradesForMatch(client, m.id);
+  return {
     id: m.id,
     competition: m.competition,
     homeTeam: m.homeTeam,
     awayTeam: m.awayTeam,
     result: m.result,
     marketConditionIds: { home: m.home, draw: m.draw, away: m.away },
-    trades: tradesByMatch.get(m.id) || [],
-  }));
+    trades,
+  };
 }
 
 // Flattens every (wallet, trade, match) triple into a single row with the
@@ -163,16 +184,10 @@ function monthKey(timestamp) {
 }
 
 // A wallet "starting hot and fading" (or the reverse) is exactly the kind of
-// thing shrinkage toward a single career-long prior can hide — one aggregate
-// win rate has no way to say a wallet's edge has decayed. Deliberately
-// simple and hand-checkable rather than a fitted trend model (see
-// PROJECT.md's "no ML" constraint): sort a wallet's own trades
-// chronologically, split into an early half and a recent half by count (not
-// by calendar window, so both halves get a comparably-sized sample instead
-// of one side being starved by an uneven trading cadence), and compare
-// shrunk win rates. Requires MIN_TRADES on *both* halves independently —
-// a wallet that barely clears the aggregate activity bar shouldn't have a
-// trend claimed about it from an even thinner half-sample.
+// thing shrinkage toward a single career-long prior can hide. Sort a
+// wallet's own trades chronologically, split into an early half and a
+// recent half by count, and compare shrunk win rates. Requires MIN_TRADES
+// on *both* halves independently.
 function computeTrend(walletRows, prior) {
   const sorted = [...walletRows].sort((a, b) => a.timestamp - b.timestamp);
   const mid = Math.floor(sorted.length / 2);
@@ -196,56 +211,13 @@ function computeTrend(walletRows, prior) {
   };
 }
 
-const WALLET_UPSERT_CHUNK = 500;
-const WALLET_COLS = ["address", "total_resolved_trades", "aggregate_win_rate", "aggregate_roi", "tier", "by_slice", "trend", "last_updated"];
-
-// Firestore's write-rate ceiling forced these out one at a time, paced
-// ~1.1s apart, with a local resume file to survive a run that took hours.
-// Postgres has no comparable per-request quota, so this is just a handful
-// of chunked bulk upserts.
-async function upsertWallets(pool, wallets) {
-  for (let i = 0; i < wallets.length; i += WALLET_UPSERT_CHUNK) {
-    const group = wallets.slice(i, i + WALLET_UPSERT_CHUNK);
-    const values = [];
-    const params = [];
-    group.forEach((w, idx) => {
-      const base = idx * WALLET_COLS.length;
-      values.push(`(${WALLET_COLS.map((_, j) => `$${base + j + 1}`).join(", ")})`);
-      params.push(w.wallet, w.totalResolvedTrades, w.aggregateWinRate, w.aggregateROI, w.tier, JSON.stringify(w.bySlice), JSON.stringify(w.trend), w.lastUpdated);
-    });
-    await pool.query(
-      `INSERT INTO wallets (${WALLET_COLS.join(", ")}) VALUES ${values.join(", ")}
-       ON CONFLICT (address) DO UPDATE SET
-         total_resolved_trades = EXCLUDED.total_resolved_trades,
-         aggregate_win_rate = EXCLUDED.aggregate_win_rate,
-         aggregate_roi = EXCLUDED.aggregate_roi,
-         tier = EXCLUDED.tier,
-         by_slice = EXCLUDED.by_slice,
-         trend = EXCLUDED.trend,
-         last_updated = EXCLUDED.last_updated`,
-      params
-    );
-    console.log(`  ${Math.min(i + WALLET_UPSERT_CHUNK, wallets.length)}/${wallets.length} wallet(s) written...`);
-  }
-}
-
-async function main() {
-  const pool = getPool();
-  console.log("Loading resolved matches + trades...");
-  const matches = await loadResolvedMatchesWithTrades(pool);
-  console.log(`${matches.length} resolved match(es) with a determined result.`);
-
-  const rows = buildTradeRows(matches);
-  console.log(`${rows.length} trade row(s) joined to a match result.`);
-  if (rows.length === 0) {
-    console.log("Nothing to rank yet.");
-    await pool.end();
-    return;
-  }
-
+// Turns a flat list of trade rows into the same {wallet, ...} result shape
+// main() below writes to Turso -- factored out so recompute.js can reuse it
+// for a single-match, single-wallet-set recompute after a resolution.
+export function rankWallets(rows, existingByWallet = new Map()) {
+  if (rows.length === 0) return [];
   const globalWins = rows.filter((r) => r.win).length;
   const globalPrior = globalWins / rows.length;
-  console.log(`Global baseline win rate: ${(globalPrior * 100).toFixed(1)}% across ${rows.length} trades.`);
 
   const byWallet = new Map();
   for (const row of rows) {
@@ -260,23 +232,66 @@ async function main() {
     const meetsQualityBar = aggregate.shrunkWinRate > globalPrior;
     const tier = meetsActivityBar && meetsQualityBar ? "watch" : "unranked";
 
-    const byCompetition = sliceBy(walletRows, (r) => r.competition, globalPrior, aggregate);
-    const byTeam = sliceBy(walletRows, (r) => r.team, globalPrior, aggregate);
-    const byMonth = sliceBy(walletRows, (r) => monthKey(r.timestamp), globalPrior, aggregate);
-    const trend = computeTrend(walletRows, globalPrior);
-
     results.push({
       wallet,
       totalResolvedTrades: aggregate.trades,
       aggregateWinRate: aggregate.shrunkWinRate,
       aggregateROI: aggregate.roi,
       tier,
-      bySlice: { byCompetition, byTeam, byMonth },
-      trend,
+      bySlice: {
+        byCompetition: sliceBy(walletRows, (r) => r.competition, globalPrior, aggregate),
+        byTeam: sliceBy(walletRows, (r) => r.team, globalPrior, aggregate),
+        byMonth: sliceBy(walletRows, (r) => monthKey(r.timestamp), globalPrior, aggregate),
+      },
+      trend: computeTrend(walletRows, globalPrior),
       lastUpdated: new Date().toISOString(),
     });
   }
+  return results;
+}
 
+const WALLET_UPSERT_CHUNK = 100; // conservative re: SQLite's bind-parameter ceiling (8 cols/row)
+const WALLET_COLS = ["address", "total_resolved_trades", "aggregate_win_rate", "aggregate_roi", "tier", "by_slice", "trend", "last_updated"];
+
+export async function upsertWallets(client, wallets) {
+  for (let i = 0; i < wallets.length; i += WALLET_UPSERT_CHUNK) {
+    const group = wallets.slice(i, i + WALLET_UPSERT_CHUNK);
+    const values = [];
+    const args = [];
+    for (const w of group) {
+      values.push(`(${WALLET_COLS.map(() => "?").join(", ")})`);
+      args.push(w.wallet, w.totalResolvedTrades, w.aggregateWinRate, w.aggregateROI, w.tier, JSON.stringify(w.bySlice), JSON.stringify(w.trend), w.lastUpdated);
+    }
+    await client.execute({
+      sql: `INSERT INTO wallets (${WALLET_COLS.join(", ")}) VALUES ${values.join(", ")}
+            ON CONFLICT(address) DO UPDATE SET
+              total_resolved_trades = excluded.total_resolved_trades,
+              aggregate_win_rate = excluded.aggregate_win_rate,
+              aggregate_roi = excluded.aggregate_roi,
+              tier = excluded.tier,
+              by_slice = excluded.by_slice,
+              trend = excluded.trend,
+              last_updated = excluded.last_updated`,
+      args,
+    });
+    console.log(`  ${Math.min(i + WALLET_UPSERT_CHUNK, wallets.length)}/${wallets.length} wallet(s) written...`);
+  }
+}
+
+async function main() {
+  const client = getClient();
+  console.log("Loading resolved matches + trades...");
+  const matches = await loadResolvedMatchesWithTrades(client);
+  console.log(`${matches.length} resolved match(es) with a determined result.`);
+
+  const rows = buildTradeRows(matches);
+  console.log(`${rows.length} trade row(s) joined to a match result.`);
+  if (rows.length === 0) {
+    console.log("Nothing to rank yet.");
+    return;
+  }
+
+  const results = rankWallets(rows);
   results.sort((a, b) => b.aggregateWinRate - a.aggregateWinRate);
   const watchCount = results.filter((r) => r.tier === "watch").length;
   console.log(`${results.length} distinct wallet(s), ${watchCount} promoted to tier:"watch".`);
@@ -288,35 +303,21 @@ async function main() {
     );
   }
 
-  const decliningWatch = results.filter((r) => r.tier === "watch" && r.trend.label === "declining");
-  if (decliningWatch.length > 0) {
-    console.log(`\n${decliningWatch.length} watched wallet(s) trending down (recent half well below their own early half):`);
-    for (const r of decliningWatch) {
-      console.log(
-        `  ${r.wallet.slice(0, 10)}... early=${(r.trend.early.winRate * 100).toFixed(1)}% ` +
-          `recent=${(r.trend.recent.winRate * 100).toFixed(1)}% (${(r.trend.delta * 100).toFixed(1)}pp)`
-      );
-    }
-  }
-
-  // Only wallets that clear the activity bar are analytically meaningful —
-  // the same MIN_TRADES bar already used everywhere else in this file (see
-  // sliceBy's own "enough" check). This dataset has ~200k distinct wallets,
-  // the overwhelming majority one-off/low-volume noise traders that will
-  // never be tier:"watch" and are unlikely to ever be looked up
-  // individually. Tier 1's "log everyone, no filtering" is about the raw
-  // trade log (PROJECT.md), not about every one-off trader needing a
-  // processed ranking row.
+  // Only wallets that clear the activity bar are analytically meaningful.
+  // This dataset has hundreds of thousands of distinct wallets, the
+  // overwhelming majority one-off/low-volume noise traders that will
+  // never be tier:"watch". Tier 1's "log everyone, no filtering" is about
+  // the raw trade archive in R2, not about every one-off trader needing a
+  // processed ranking row in Turso.
   const toWrite = results.filter((r) => r.totalResolvedTrades >= MIN_TRADES);
   console.log(`\n${results.length} distinct wallet(s) total, ${toWrite.length} clear the ${MIN_TRADES}-trade activity bar and will be written.`);
 
   console.log("\nWriting wallets...");
-  await upsertWallets(pool, toWrite);
+  await upsertWallets(client, toWrite);
   console.log(`\nDone. ${toWrite.length} wallet(s) written this run.`);
-  await pool.end();
 }
 
-export { shrink, pnlAndStake, legFor, buildTradeRows, summarize, sliceBy, monthKey, computeTrend, MIN_TRADES, SHRINKAGE_K, TREND_THRESHOLD };
+export { shrink, pnlAndStake, legFor, buildTradeRows, summarize, sliceBy, monthKey, computeTrend, loadResolvedMatchesWithTrades, MIN_TRADES, SHRINKAGE_K, TREND_THRESHOLD };
 
 if (isMainModule(import.meta.url)) {
   main().catch((err) => {

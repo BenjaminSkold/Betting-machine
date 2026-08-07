@@ -1,8 +1,20 @@
-// Mirrors the Postgres data model in supabase/migrations, as actually
-// written by pipeline/src/{collect,backfill,rankWallets,scoreMatches,paperBets}.js.
+// Mirrors the Turso schema in turso/schema.sql plus the R2 trade archive,
+// as actually written by pipeline/src/{collect,backfill,rankWallets,scoreMatches,paperBets}.js.
 
 export type Competition = "EPL" | "UCL" | "UEL" | "UECL";
 export type Leg = "home" | "draw" | "away";
+
+// One entry inside a batched trade file in R2 (trades/{matchId}/{pollTimestamp}.json.gz).
+export interface RawTrade {
+  key?: string; // natural dedup key -- see tradeArchive.ts's readAllTradesForMatch
+  wallet: string;
+  side: string;
+  size: number;
+  price: number;
+  timestamp: number;
+  outcome: string;
+  conditionId: string;
+}
 
 // Flattened, match-annotated trade row — shared shape between the Trades
 // page and its CSV export so they can't silently drift apart.
