@@ -1,8 +1,12 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { ArrowLeft } from "lucide-react";
 import { getMatches, getMatchTrades, getWallet } from "@/lib/data";
 import type { Wallet, WalletTrend } from "@/lib/types";
 import { isValidWalletAddress } from "@/lib/validate";
+import StatTile from "@/components/StatTile";
+import BarChart, { type BarDatum } from "@/components/BarChart";
+import FadeIn from "@/components/FadeIn";
 
 export const dynamic = "force-dynamic";
 
@@ -33,17 +37,34 @@ export default async function WalletDetailPage({ params }: { params: Promise<{ a
     .flatMap((x) => x.trades.map((t) => ({ ...t, match: x.match })))
     .sort((a, b) => b.timestamp - a.timestamp);
 
+  // Win/loss per trade, for the activity feed's visual indicator -- needs
+  // the match's eventual result and which leg this trade's conditionId
+  // maps to, same logic rankWallets.js's legFor() uses server-side.
+  function outcome(t: (typeof activity)[number]): "win" | "loss" | "pending" {
+    if (!t.match.data.resolved || !t.match.data.result) return "pending";
+    const ids = t.match.data.marketConditionIds;
+    const leg = t.conditionId === ids?.home ? "home" : t.conditionId === ids?.draw ? "draw" : t.conditionId === ids?.away ? "away" : null;
+    if (!leg) return "pending";
+    const legWon = leg === t.match.data.result;
+    const sideWon = (t.outcome === "Yes") === legWon;
+    return sideWon ? "win" : "loss";
+  }
+
+  const competitionBars: BarDatum[] = Object.entries(wallet.data.bySlice.byCompetition)
+    .map(([label, s]) => ({ label, value: (s.winRate ?? 0.5) - 0.5, n: s.trades }))
+    .sort((a, b) => b.value - a.value);
+
   return (
     <div className="max-w-4xl">
-      <Link href="/wallets" className="text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
-        ← Wallets
+      <Link href="/wallets" className="inline-flex items-center gap-1 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
+        <ArrowLeft size={14} /> Wallets
       </Link>
 
-      <div className="mt-2 mb-6">
+      <div className="mt-3 mb-6">
         <h1 className="break-all font-mono text-xl font-semibold text-[var(--text-primary)]">{address}</h1>
-        <div className="mt-1 flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+        <div className="mt-1.5 flex items-center gap-2 text-sm text-[var(--text-secondary)]">
           <span
-            className="rounded-full px-2 py-0.5 text-xs font-medium"
+            className="rounded-full px-2.5 py-0.5 text-xs font-medium"
             style={{ background: wallet.data.tier === "watch" ? "var(--status-good)" : "var(--gridline)", color: wallet.data.tier === "watch" ? "white" : "var(--text-secondary)" }}
           >
             {wallet.data.tier}
@@ -53,36 +74,39 @@ export default async function WalletDetailPage({ params }: { params: Promise<{ a
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-1)] px-5 py-4">
-          <div className="text-sm text-[var(--text-secondary)]">Resolved trades</div>
-          <div className="mt-1 text-3xl font-semibold text-[var(--text-primary)]">{wallet.data.totalResolvedTrades}</div>
-        </div>
-        <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-1)] px-5 py-4">
-          <div className="text-sm text-[var(--text-secondary)]">Win rate (shrunk)</div>
-          <div className="mt-1 text-3xl font-semibold text-[var(--text-primary)]">{pct(wallet.data.aggregateWinRate)}</div>
-        </div>
-        <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-1)] px-5 py-4">
-          <div className="text-sm text-[var(--text-secondary)]">ROI</div>
-          <div className="mt-1 text-3xl font-semibold text-[var(--text-primary)]">{pct(wallet.data.aggregateROI)}</div>
-        </div>
+        <StatTile label="Resolved trades" animate={wallet.data.totalResolvedTrades} format={(n) => n.toFixed(0)} />
+        <StatTile label="Win rate (shrunk)" animate={wallet.data.aggregateWinRate * 100} format={(n) => `${n.toFixed(1)}%`} />
+        <StatTile
+          label="ROI"
+          animate={(wallet.data.aggregateROI ?? 0) * 100}
+          format={(n) => `${n.toFixed(1)}%`}
+          deltaGood={(wallet.data.aggregateROI ?? 0) >= 0}
+        />
       </div>
 
-      <TrendCard trend={wallet.data.trend} />
+      <FadeIn className="mt-6">
+        <TrendCard trend={wallet.data.trend} />
+      </FadeIn>
 
-      <SliceTable title="By competition" slices={wallet.data.bySlice.byCompetition} />
+      {competitionBars.length > 0 && (
+        <FadeIn className="mt-6">
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-[var(--text-muted)]">Edge over average, by competition</h2>
+          <BarChart data={competitionBars} baseline={0} unit="pp" valueFormat={(v) => `${v >= 0 ? "+" : ""}${(v * 100).toFixed(1)}`} />
+        </FadeIn>
+      )}
+
       <SliceTable title="By team" slices={wallet.data.bySlice.byTeam} />
       <SliceTable title="By month" slices={wallet.data.bySlice.byMonth} chronological />
 
-      <h2 className="mt-8 mb-3 text-sm font-semibold uppercase tracking-wide text-[var(--text-muted)]">Recent activity</h2>
+      <h2 className="mt-8 mb-3 text-sm font-semibold uppercase tracking-wide text-[var(--text-muted)]">Trade history</h2>
       {activity.length === 0 ? (
-        <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-1)] px-4 py-6 text-sm text-[var(--text-muted)]">
-          No trades found for this wallet yet.
-        </div>
+        <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-1)] px-4 py-6 text-sm text-[var(--text-muted)]">No trades found for this wallet yet.</div>
       ) : (
         <div className="overflow-x-auto rounded-lg border border-[var(--border)] bg-[var(--surface-1)]">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-[var(--border)] text-left text-xs uppercase tracking-wide text-[var(--text-muted)]">
+                <th scope="col" className="px-4 py-3"></th>
                 <th scope="col" className="px-4 py-3">When</th>
                 <th scope="col" className="px-4 py-3">Match</th>
                 <th scope="col" className="px-4 py-3">Side</th>
@@ -91,21 +115,26 @@ export default async function WalletDetailPage({ params }: { params: Promise<{ a
               </tr>
             </thead>
             <tbody>
-              {activity.slice(0, 200).map((t, i) => (
-                <tr key={i} className="border-b border-[var(--border)] last:border-0">
-                  <td className="tabular px-4 py-2 text-[var(--text-secondary)]">{new Date(t.timestamp * 1000).toLocaleString()}</td>
-                  <td className="px-4 py-2">
-                    <Link href={`/matches/${t.match.id}`} className="text-[var(--text-primary)] hover:underline">
-                      {t.match.data.homeTeam} vs. {t.match.data.awayTeam}
-                    </Link>
-                  </td>
-                  <td className="px-4 py-2 text-[var(--text-secondary)]">
-                    {t.side} {t.outcome}
-                  </td>
-                  <td className="tabular px-4 py-2 text-right text-[var(--text-primary)]">{(t.price * 100).toFixed(1)}%</td>
-                  <td className="tabular px-4 py-2 text-right text-[var(--text-primary)]">${t.size.toFixed(0)}</td>
-                </tr>
-              ))}
+              {activity.slice(0, 200).map((t, i) => {
+                const o = outcome(t);
+                const dotColor = o === "win" ? "var(--status-good)" : o === "loss" ? "var(--status-critical)" : "var(--gridline)";
+                return (
+                  <tr key={i} className="border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--page-plane)]">
+                    <td className="pl-4"><span className="inline-block h-2 w-2 rounded-full" style={{ background: dotColor }} title={o} /></td>
+                    <td className="tabular px-4 py-2 text-[var(--text-secondary)]">{new Date(t.timestamp * 1000).toLocaleString()}</td>
+                    <td className="px-4 py-2">
+                      <Link href={`/matches/${t.match.id}`} className="text-[var(--text-primary)] hover:underline">
+                        {t.match.data.homeTeam} vs. {t.match.data.awayTeam}
+                      </Link>
+                    </td>
+                    <td className="px-4 py-2 text-[var(--text-secondary)]">
+                      {t.side} {t.outcome}
+                    </td>
+                    <td className="tabular px-4 py-2 text-right text-[var(--text-primary)]">{(t.price * 100).toFixed(1)}%</td>
+                    <td className="tabular px-4 py-2 text-right text-[var(--text-primary)]">${t.size.toFixed(0)}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -114,24 +143,11 @@ export default async function WalletDetailPage({ params }: { params: Promise<{ a
   );
 }
 
-// `chronological` is for "By month": sorting by winRate there would scatter
-// the timeline and defeat the point of looking for a trend, so sort by the
-// "YYYY-MM" key itself (lexicographic == chronological) instead.
-function SliceTable({
-  title,
-  slices,
-  chronological = false,
-}: {
-  title: string;
-  slices: Wallet["bySlice"]["byCompetition"];
-  chronological?: boolean;
-}) {
-  const entries = Object.entries(slices).sort((a, b) =>
-    chronological ? a[0].localeCompare(b[0]) : (b[1].winRate ?? 0) - (a[1].winRate ?? 0)
-  );
+function SliceTable({ title, slices, chronological = false }: { title: string; slices: Wallet["bySlice"]["byCompetition"]; chronological?: boolean }) {
+  const entries = Object.entries(slices).sort((a, b) => (chronological ? a[0].localeCompare(b[0]) : (b[1].winRate ?? 0) - (a[1].winRate ?? 0)));
   if (entries.length === 0) return null;
   return (
-    <div className="mt-6">
+    <FadeIn className="mt-6">
       <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-[var(--text-muted)]">{title}</h2>
       <div className="overflow-x-auto rounded-lg border border-[var(--border)] bg-[var(--surface-1)]">
         <table className="w-full text-sm">
@@ -157,17 +173,16 @@ function SliceTable({
           </tbody>
         </table>
       </div>
-    </div>
+    </FadeIn>
   );
 }
 
 function TrendCard({ trend }: { trend: WalletTrend }) {
-  const dotColor =
-    trend.label === "declining" ? "var(--status-critical)" : trend.label === "improving" ? "var(--status-good)" : "var(--text-muted)";
+  const dotColor = trend.label === "declining" ? "var(--status-critical)" : trend.label === "improving" ? "var(--status-good)" : "var(--text-muted)";
   const deltaColor = trend.delta === null ? "var(--text-muted)" : trend.delta >= 0 ? "var(--status-good-text)" : "var(--status-critical)";
 
   return (
-    <div className="mt-6 rounded-lg border border-[var(--border)] bg-[var(--surface-1)] p-4">
+    <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-1)] p-4">
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-sm font-semibold uppercase tracking-wide text-[var(--text-muted)]">Trend</h2>
         <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--text-secondary)]">
@@ -177,8 +192,8 @@ function TrendCard({ trend }: { trend: WalletTrend }) {
       </div>
       {trend.label === "insufficient data" ? (
         <p className="text-sm text-[var(--text-muted)]">
-          Not enough trades in this wallet&apos;s early and recent halves yet to say anything about a trend — each half needs its own
-          activity bar cleared independently.
+          Not enough trades in this wallet&apos;s early and recent halves yet to say anything about a trend — each half needs its own activity bar
+          cleared independently.
         </p>
       ) : (
         <div className="grid grid-cols-3 gap-4">
