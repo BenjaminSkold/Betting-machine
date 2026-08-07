@@ -62,13 +62,32 @@ export const COMPETITION_TAGS = {
 
 // Season-spanning series ids, used for backfill (and are a cleaner discovery
 // key than tag_id union in general — verified against the 2025-26 season).
-// UCL/UEL each also have an older series covering only 2024-25's knockout
-// rounds tail; those are intentionally excluded here as out of scope.
+// The 2024-25 season isn't reachable this way: EPL never got its own series
+// id for that season at all, and UCL/UEL's old series only covers a partial
+// knockout-rounds tail. See findResolvedMatches below for how 2024-25 is
+// actually discovered instead (tag-based, date-bounded).
 export const COMPETITION_SERIES = {
   EPL: [10188], // "Premier League 2025" — 2025-26 season, currently still the active series
   UCL: [10204], // "UEFA Champions League 2025" — 2025-26 season + 2026-27 qualifiers so far
   UEL: [10209], // "UEFA Europa League 2025"
 };
+
+// 2024-25 season window, used only for the tag-based discovery fallback
+// below. Verified live: tag-based + this date filter surfaces 375 EPL,
+// 185 UCL, and 179 UEL 2024-25 matches -- full or near-full season
+// coverage, unlike the fragmentary old series ids.
+const LAST_SEASON_START = "2024-07-01";
+const LAST_SEASON_END = "2025-06-15";
+
+// Current-season events title as plain "Home vs. Away". 2024-25 events
+// (discovered via findResolvedMatches's tag-based fallback) are prefixed
+// with a competition label instead -- "EPL: Home vs. Away", "UCL: Home vs.
+// Away", "Europa League: Home vs. Away" (sometimes with stray leading
+// whitespace). Stripping this is a no-op on current-season titles, so
+// classifyMarkets can call this unconditionally regardless of season.
+export function stripCompetitionPrefix(title) {
+  return title.replace(/^\s*(EPL|UCL|UEL|UECL|Europa League|Europa Conference League|Champions League)\s*:\s*/i, "");
+}
 
 // A real single-match event has a title like "Home vs. Away" (moneyline) and
 // 2-3 binary Yes/No markets. Sub-markets ("- Total Corners", "- Halftime
@@ -107,14 +126,31 @@ export async function findLiveMatches(competition) {
   return [...byId.values()].filter(looksLikeSingleMatch);
 }
 
-// Resolved matches for a competition's backfill season(s).
+// Resolved matches for a competition's backfill season(s): the current
+// season via its series id, unioned with last season (2024-25) via a
+// date-bounded tag search -- 2024-25 has no usable series id for any of
+// these three competitions (see COMPETITION_SERIES's comment). Older
+// 2024-25 events use a different title format ("EPL: Team vs. Team",
+// "UCL: Team vs. Team", "Europa League: Team vs. Team" — see
+// stripCompetitionPrefix in collect.js/backfill.js) and different market
+// question phrasing ("Will X beat Y?" instead of "Will X win on <date>?"),
+// but classifyMarkets's startsWith() check already generalizes across
+// both once the title prefix is stripped correctly.
 export async function findResolvedMatches(competition) {
-  const seriesIds = COMPETITION_SERIES[competition];
-  if (!seriesIds) throw new Error(`No backfill series configured for: ${competition}`);
+  const seriesIds = COMPETITION_SERIES[competition] || [];
+  const tagIds = COMPETITION_TAGS[competition];
+  if (!tagIds) throw new Error(`Unknown competition: ${competition}`);
+
   const byId = new Map();
   for (const seriesId of seriesIds) {
     const events = await paginateEvents("series_id", seriesId, { closed: true });
     for (const e of events) byId.set(e.id, e);
+  }
+  for (const tagId of tagIds) {
+    const events = await paginateEvents("tag_id", tagId, { closed: true });
+    for (const e of events) {
+      if (e.startDate >= LAST_SEASON_START && e.startDate < LAST_SEASON_END) byId.set(e.id, e);
+    }
   }
   return [...byId.values()].filter(looksLikeSingleMatch);
 }

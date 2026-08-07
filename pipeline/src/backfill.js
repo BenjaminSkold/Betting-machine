@@ -9,7 +9,7 @@
 // spreads across many runs over hours/days, not one long burst.
 import { getClient, upsertMatch, insertSnapshot, getMatchRow, withTransaction } from "./db.js";
 import { writeTradeBatch } from "./tradeArchive.js";
-import { findResolvedMatches, getAllTrades, getPriceHistory, clobTokenIdsFor, tradeKey } from "./polymarket.js";
+import { findResolvedMatches, getAllTrades, getPriceHistory, clobTokenIdsFor, tradeKey, stripCompetitionPrefix } from "./polymarket.js";
 
 const COMPETITIONS = ["EPL", "UCL", "UEL"];
 // Historical price-history reconstruction only has fixed sample points to
@@ -30,7 +30,7 @@ function sleep(ms) {
 }
 
 function classifyMarkets(event) {
-  const [homeTeam, awayTeam] = event.title.split(" vs. ").map((s) => s.trim());
+  const [homeTeam, awayTeam] = stripCompetitionPrefix(event.title).split(" vs. ").map((s) => s.trim());
   const found = {};
   for (const m of event.markets) {
     if (/end in a draw/i.test(m.question)) found.draw = m;

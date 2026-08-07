@@ -1,6 +1,6 @@
 import { getClient, getMatchRow, upsertMatch, insertSnapshot } from "./db.js";
 import { writeTradeBatch } from "./tradeArchive.js";
-import { findLiveMatches, getAllTrades, tradeKey } from "./polymarket.js";
+import { findLiveMatches, getAllTrades, tradeKey, stripCompetitionPrefix } from "./polymarket.js";
 import { isMainModule } from "./isMain.js";
 import { recomputeWalletsOnResolution } from "./recompute.js";
 
@@ -48,7 +48,7 @@ export function isDue(lastPolledAt, intervalMs, now = Date.now()) {
 // "Will {team} win on {date}?" or "... end in a draw?". Match them back to
 // home/draw/away using the team names parsed from the event title.
 function classifyMarkets(event) {
-  const [homeTeam, awayTeam] = event.title.split(" vs. ").map((s) => s.trim());
+  const [homeTeam, awayTeam] = stripCompetitionPrefix(event.title).split(" vs. ").map((s) => s.trim());
   const found = {};
   for (const m of event.markets) {
     if (/end in a draw/i.test(m.question)) found.draw = m;
