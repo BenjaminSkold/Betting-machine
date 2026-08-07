@@ -3,6 +3,8 @@ import { getMatches, getPaperBets } from "@/lib/data";
 import { MIN_SETTLED_BETS_TO_TRUST } from "@/lib/types";
 import { edgeBucketLabel, favoriteUnderdogLabel, segmentStats, sortByBucketOrder, type Segment } from "@/lib/breakdown";
 
+export const dynamic = "force-dynamic";
+
 function pct(x: number | null): string {
   return x !== null ? `${(x * 100).toFixed(1)}%` : "—";
 }

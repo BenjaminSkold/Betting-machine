@@ -5,6 +5,8 @@ import PriceHistoryChart, { type PricePoint } from "@/components/PriceHistoryCha
 import type { Leg } from "@/lib/types";
 import { isValidMatchId } from "@/lib/validate";
 
+export const dynamic = "force-dynamic";
+
 function pct(x: number | null | undefined): string {
   if (x === null || x === undefined) return "—";
   return `${(x * 100).toFixed(1)}%`;

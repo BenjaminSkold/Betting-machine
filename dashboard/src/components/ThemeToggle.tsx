@@ -1,6 +1,7 @@
 "use client";
 
 import { useLayoutEffect, useSyncExternalStore } from "react";
+import { Sun, Moon, MonitorSmartphone } from "lucide-react";
 
 type Theme = "light" | "dark" | "system";
 
@@ -49,16 +50,16 @@ export default function ThemeToggle() {
     window.dispatchEvent(new StorageEvent("storage"));
   }
 
-  const icon = theme === "light" ? "☀" : theme === "dark" ? "☾" : "◐";
+  const Icon = theme === "light" ? Sun : theme === "dark" ? Moon : MonitorSmartphone;
   const label = theme === "light" ? "Light" : theme === "dark" ? "Dark" : "System";
 
   return (
     <button
       onClick={cycle}
-      className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-[var(--text-secondary)] hover:bg-[var(--page-plane)] hover:text-[var(--text-primary)]"
+      className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium text-[var(--text-secondary)] transition-colors duration-150 hover:bg-[var(--page-plane)] hover:text-[var(--text-primary)]"
       title="Cycle theme"
     >
-      <span aria-hidden>{icon}</span>
+      <Icon size={16} strokeWidth={2} aria-hidden className="opacity-70" />
       {label}
     </button>
   );

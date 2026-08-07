@@ -40,7 +40,15 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       </head>
       <body className="min-h-full flex flex-col md:flex-row bg-[var(--page-plane)]">
         <Sidebar />
-        <main className="flex-1 min-w-0 px-4 py-6 md:px-8 md:py-8">{children}</main>
+        <main className="relative flex-1 min-w-0 px-4 py-6 md:px-10 md:py-10">
+          {/* Very subtle radial glow, not a texture -- depth without competing with the data. */}
+          <div
+            aria-hidden="true"
+            className="pointer-events-none fixed inset-0 -z-10 opacity-[0.06]"
+            style={{ background: "radial-gradient(1200px circle at 15% 0%, var(--diverging-pos), transparent 60%)" }}
+          />
+          {children}
+        </main>
       </body>
     </html>
   );

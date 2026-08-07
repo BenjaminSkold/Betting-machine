@@ -2,6 +2,8 @@ import Link from "next/link";
 import { getFilteredTradeRows } from "@/lib/data";
 import type { Competition } from "@/lib/types";
 
+export const dynamic = "force-dynamic";
+
 const PAGE_SIZE = 100;
 
 export default async function TradesPage({

@@ -3,6 +3,8 @@ import { getAllConfluenceScores, getMatches, getSystemStatus } from "@/lib/data"
 import type { Competition, ConfluenceScore } from "@/lib/types";
 import { freshnessAge } from "@/lib/time";
 
+export const dynamic = "force-dynamic";
+
 function formatKickoff(iso: string): string {
   const d = new Date(iso);
   return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });

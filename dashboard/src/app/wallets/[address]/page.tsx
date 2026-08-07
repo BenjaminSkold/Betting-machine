@@ -4,6 +4,8 @@ import { getMatches, getMatchTrades, getWallet } from "@/lib/data";
 import type { Wallet, WalletTrend } from "@/lib/types";
 import { isValidWalletAddress } from "@/lib/validate";
 
+export const dynamic = "force-dynamic";
+
 function pct(x: number | null | undefined): string {
   if (x === null || x === undefined) return "—";
   return `${(x * 100).toFixed(1)}%`;

@@ -3,6 +3,12 @@ import StatTile from "@/components/StatTile";
 import { getMatches, getPaperBets, getSystemStatus, getWallets } from "@/lib/data";
 import { freshnessAge } from "@/lib/time";
 
+// Every page here reads live pipeline state -- without this, Next statically
+// prerenders pages with no dynamic route/searchParams input at BUILD time
+// and serves that frozen snapshot forever in production. Caught by actually
+// running `next build` and reading its route table, not assumed.
+export const dynamic = "force-dynamic";
+
 export default async function OverviewPage() {
   const [matches, wallets, paperBets, status] = await Promise.all([getMatches(), getWallets(), getPaperBets(), getSystemStatus()]);
 
