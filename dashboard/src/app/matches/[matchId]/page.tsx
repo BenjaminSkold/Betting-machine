@@ -6,6 +6,7 @@ import PriceHistoryChart, { type PricePoint } from "@/components/PriceHistoryCha
 import EdgeBadge from "@/components/EdgeBadge";
 import FadeIn from "@/components/FadeIn";
 import ManualBetForm from "@/components/ManualBetForm";
+import { isBacking, tradeWon, outcomeLabel } from "@/lib/tradeOutcome";
 import type { Leg } from "@/lib/types";
 import { isValidMatchId } from "@/lib/validate";
 
@@ -119,29 +120,34 @@ export default async function MatchDetailPage({ params }: { params: Promise<{ ma
               <tr className="border-b border-[var(--border)] text-left text-xs uppercase tracking-wide text-[var(--text-muted)]">
                 <th scope="col" className="px-4 py-2.5">Wallet</th>
                 <th scope="col" className="px-4 py-2.5">Leg</th>
-                <th scope="col" className="px-4 py-2.5">Side</th>
+                <th scope="col" className="px-4 py-2.5">Direction</th>
+                <th scope="col" className="px-4 py-2.5">Result</th>
                 <th scope="col" className="tabular px-4 py-2.5 text-right">Size</th>
                 <th scope="col" className="tabular px-4 py-2.5 text-right">Price</th>
                 <th scope="col" className="tabular px-4 py-2.5 text-right">When</th>
               </tr>
             </thead>
             <tbody>
-              {recentTrades.map((t, i) => (
-                <tr key={i} className="border-b border-[var(--border)] text-[var(--text-secondary)] last:border-0 hover:bg-[var(--page-plane)]">
-                  <td className="px-4 py-2">
-                    <Link href={`/wallets/${t.wallet}`} className="font-mono text-xs text-[var(--diverging-pos)] hover:underline">
-                      {t.wallet.slice(0, 10)}…
-                    </Link>
-                  </td>
-                  <td className="px-4 py-2 text-xs">{legLabel[legByCondition.get(t.conditionId) ?? "draw"]}</td>
-                  <td className="px-4 py-2 text-xs">
-                    {t.side} {t.outcome}
-                  </td>
-                  <td className="tabular px-4 py-2 text-right text-xs text-[var(--text-primary)]">${t.size.toFixed(0)}</td>
-                  <td className="tabular px-4 py-2 text-right text-xs text-[var(--text-primary)]">{(t.price * 100).toFixed(1)}%</td>
-                  <td className="tabular px-4 py-2 text-right text-xs">{new Date(t.timestamp * 1000).toLocaleString()}</td>
-                </tr>
-              ))}
+              {recentTrades.map((t, i) => {
+                const leg = legByCondition.get(t.conditionId) ?? null;
+                const won = tradeWon(t, leg, match.data.resolved, match.data.result);
+                const resultColor = won === null ? "var(--text-muted)" : won ? "var(--status-good-text)" : "var(--status-critical)";
+                return (
+                  <tr key={i} className="border-b border-[var(--border)] text-[var(--text-secondary)] last:border-0 hover:bg-[var(--page-plane)]">
+                    <td className="px-4 py-2">
+                      <Link href={`/wallets/${t.wallet}`} className="font-mono text-xs text-[var(--diverging-pos)] hover:underline">
+                        {t.wallet.slice(0, 10)}…
+                      </Link>
+                    </td>
+                    <td className="px-4 py-2 text-xs">{legLabel[legByCondition.get(t.conditionId) ?? "draw"]}</td>
+                    <td className="px-4 py-2 text-xs">{isBacking(t) ? "Backing" : "Fading"}</td>
+                    <td className="px-4 py-2 text-xs font-medium" style={{ color: resultColor }}>{outcomeLabel(won)}</td>
+                    <td className="tabular px-4 py-2 text-right text-xs text-[var(--text-primary)]">${t.size.toFixed(0)}</td>
+                    <td className="tabular px-4 py-2 text-right text-xs text-[var(--text-primary)]">{(t.price * 100).toFixed(1)}%</td>
+                    <td className="tabular px-4 py-2 text-right text-xs">{new Date(t.timestamp * 1000).toLocaleString()}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

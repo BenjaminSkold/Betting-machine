@@ -28,13 +28,18 @@ export function tradeWon(trade: Pick<RawTrade, "side" | "outcome">, leg: Leg | n
   return trade.side === "BUY" ? outcomeFlagMatchesResult : !outcomeFlagMatchesResult;
 }
 
+// "BUY Yes" / "SELL No" is Polymarket's own share-type jargon -- whether a
+// fill is actually betting FOR or AGAINST a leg happening.
+export function isBacking(trade: Pick<RawTrade, "side" | "outcome">): boolean {
+  return (trade.outcome === "Yes") === (trade.side === "BUY");
+}
+
 // "BUY Yes" / "SELL No" is Polymarket's own share-type jargon -- what a
 // person actually did was back or fade a specific team (or the draw). Plain
 // language for every page that lists raw fills.
 export function positionLabel(trade: Pick<RawTrade, "side" | "outcome">, leg: Leg | null, homeTeam: string, awayTeam: string): string {
   if (!leg) return `${trade.side} ${trade.outcome}`;
-  const backing = (trade.outcome === "Yes") === (trade.side === "BUY");
-  return `${backing ? "Backed" : "Faded"} ${legLabel(leg, homeTeam, awayTeam)}`;
+  return `${isBacking(trade) ? "Backed" : "Faded"} ${legLabel(leg, homeTeam, awayTeam)}`;
 }
 
 export function outcomeLabel(won: boolean | null): "Win" | "Loss" | "Pending" {
