@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { getFilteredTradeRows } from "@/lib/data";
+import { positionLabel, outcomeLabel } from "@/lib/tradeOutcome";
 import type { Competition } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -41,6 +42,12 @@ export default async function TradesPage({
     <div className="max-w-5xl">
       <h1 className="mb-1 text-2xl font-semibold text-[var(--text-primary)]">Trades</h1>
       <p className="mb-6 text-sm text-[var(--text-secondary)]">Every Tier 1 trade log, across every tracked match.</p>
+
+      {!params.competition && (
+        <p className="mb-4 text-xs text-[var(--text-muted)]">
+          No competition selected — showing the most recent matches only. Pick a competition above to see its full season.
+        </p>
+      )}
 
       <form role="search" aria-label="Filter trades" className="mb-4 flex flex-wrap gap-3 rounded-lg border border-[var(--border)] bg-[var(--surface-1)] p-3">
         <label htmlFor="trade-wallet" className="sr-only">
@@ -116,26 +123,30 @@ export default async function TradesPage({
                 <th scope="col" className="px-4 py-3">When</th>
                 <th scope="col" className="px-4 py-3">Match</th>
                 <th scope="col" className="px-4 py-3">Wallet</th>
-                <th scope="col" className="px-4 py-3">Side</th>
+                <th scope="col" className="px-4 py-3">Position</th>
+                <th scope="col" className="px-4 py-3">Result</th>
                 <th scope="col" className="tabular px-4 py-3 text-right">Price</th>
                 <th scope="col" className="tabular px-4 py-3 text-right">Size</th>
               </tr>
             </thead>
             <tbody>
-              {shown.map((t, i) => (
-                <tr key={i} className="border-b border-[var(--border)] last:border-0">
-                  <td className="tabular px-4 py-2 text-[var(--text-secondary)]">{new Date(t.timestamp * 1000).toLocaleString()}</td>
-                  <td className="px-4 py-2 text-[var(--text-primary)]">
-                    <span className="text-xs text-[var(--text-muted)]">{t.competition}</span> {t.homeTeam} vs. {t.awayTeam}
-                  </td>
-                  <td className="px-4 py-2 font-mono text-xs text-[var(--text-secondary)]">{t.wallet.slice(0, 12)}…</td>
-                  <td className="px-4 py-2 text-[var(--text-secondary)]">
-                    {t.side} {t.outcome}
-                  </td>
-                  <td className="tabular px-4 py-2 text-right text-[var(--text-primary)]">{(t.price * 100).toFixed(1)}%</td>
-                  <td className="tabular px-4 py-2 text-right text-[var(--text-primary)]">${t.size.toFixed(0)}</td>
-                </tr>
-              ))}
+              {shown.map((t, i) => {
+                const outcome = outcomeLabel(t.won);
+                const outcomeColor = t.won === null ? "var(--text-muted)" : t.won ? "var(--status-good-text)" : "var(--status-critical)";
+                return (
+                  <tr key={i} className="border-b border-[var(--border)] last:border-0">
+                    <td className="tabular px-4 py-2 text-[var(--text-secondary)]">{new Date(t.timestamp * 1000).toLocaleString()}</td>
+                    <td className="px-4 py-2 text-[var(--text-primary)]">
+                      <span className="text-xs text-[var(--text-muted)]">{t.competition}</span> {t.homeTeam} vs. {t.awayTeam}
+                    </td>
+                    <td className="px-4 py-2 font-mono text-xs text-[var(--text-secondary)]">{t.wallet.slice(0, 12)}…</td>
+                    <td className="px-4 py-2 text-[var(--text-secondary)]">{positionLabel(t, t.leg, t.homeTeam, t.awayTeam)}</td>
+                    <td className="px-4 py-2 font-medium" style={{ color: outcomeColor }}>{outcome}</td>
+                    <td className="tabular px-4 py-2 text-right text-[var(--text-primary)]">{(t.price * 100).toFixed(1)}%</td>
+                    <td className="tabular px-4 py-2 text-right text-[var(--text-primary)]">${t.size.toFixed(0)}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

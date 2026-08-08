@@ -1,6 +1,6 @@
 "use client";
 
-import { useTransition } from "react";
+import { useEffect, useRef, useTransition } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Loader2 } from "lucide-react";
 import { EDGE_BUCKETS, TIMING_BUCKETS } from "@/lib/breakdown";
@@ -27,7 +27,7 @@ function isoDaysAgo(days: number): string {
 // filters are not chart marks. `fields` lets each page show only the
 // controls that apply to it; the URL is the single source of truth so
 // every chart/stat/table on the page re-renders against the same slice.
-export default function FilterBar({ fields }: { fields: FilterField[] }) {
+export default function FilterBar({ fields, teamsByCompetition }: { fields: FilterField[]; teamsByCompetition?: Record<string, string[]> }) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -40,6 +40,18 @@ export default function FilterBar({ fields }: { fields: FilterField[] }) {
     startTransition(() => {
       router.replace(`${pathname}?${params.toString()}`, { scroll: false });
     });
+  }
+
+  // Text inputs (team/wallet) navigate on every keystroke otherwise -- each
+  // navigation re-renders the Server Component tree around this input,
+  // which steals focus after the very first character typed. Debouncing
+  // means the URL (and the page's data) only updates once the user pauses,
+  // so the input stays focused and mid-word.
+  const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (debounceTimer.current) clearTimeout(debounceTimer.current); }, []);
+  function updateDebounced(key: string, value: string) {
+    if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    debounceTimer.current = setTimeout(() => update(key, value), 400);
   }
 
   const has = (f: FilterField) => fields.includes(f);
@@ -94,21 +106,35 @@ export default function FilterBar({ fields }: { fields: FilterField[] }) {
         </select>
       )}
 
-      {has("team") && (
-        <input
-          className={`${inputClass} w-32`}
-          placeholder="Team"
-          defaultValue={searchParams.get("team") ?? ""}
-          onChange={(e) => update("team", e.target.value)}
-        />
-      )}
+      {has("team") &&
+        (teamsByCompetition ? (
+          <select className={inputClass} value={searchParams.get("team") ?? ""} onChange={(e) => update("team", e.target.value || null)}>
+            <option value="">All teams</option>
+            {(() => {
+              const selectedCompetition = searchParams.get("competition");
+              const teams = selectedCompetition
+                ? (teamsByCompetition[selectedCompetition] ?? [])
+                : [...new Set(Object.values(teamsByCompetition).flat())].sort();
+              return teams.map((t) => (
+                <option key={t} value={t}>{t}</option>
+              ));
+            })()}
+          </select>
+        ) : (
+          <input
+            className={`${inputClass} w-32`}
+            placeholder="Team"
+            defaultValue={searchParams.get("team") ?? ""}
+            onChange={(e) => updateDebounced("team", e.target.value)}
+          />
+        ))}
 
       {has("wallet") && (
         <input
           className={`${inputClass} w-36 font-mono`}
           placeholder="Wallet 0x…"
           defaultValue={searchParams.get("wallet") ?? ""}
-          onChange={(e) => update("wallet", e.target.value)}
+          onChange={(e) => updateDebounced("wallet", e.target.value)}
         />
       )}
 

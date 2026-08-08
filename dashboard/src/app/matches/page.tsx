@@ -1,6 +1,6 @@
 import Link from "next/link";
-import { getAllConfluenceScores, getMatches, getSystemStatus } from "@/lib/data";
-import type { ConfluenceScore } from "@/lib/types";
+import { getAllConfluenceScoresLight, getMatches, getSystemStatus, getTeamsByCompetition } from "@/lib/data";
+import type { ConfluenceScoreLight } from "@/lib/data";
 import { freshnessAge } from "@/lib/time";
 import { parseFilters, isMatchInDateRange } from "@/lib/filters";
 import FilterBar from "@/components/FilterBar";
@@ -17,9 +17,14 @@ function formatKickoff(iso: string): string {
 export default async function MatchesPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const rawParams = await searchParams;
   const filters = parseFilters(rawParams);
-  const [allMatches, scores, status] = await Promise.all([getMatches(), getAllConfluenceScores(), getSystemStatus()]);
+  const [allMatches, scores, status, teamsByCompetition] = await Promise.all([
+    getMatches(),
+    getAllConfluenceScoresLight(),
+    getSystemStatus(),
+    getTeamsByCompetition(),
+  ]);
 
-  const scoresByMatch = new Map<string, ConfluenceScore[]>();
+  const scoresByMatch = new Map<string, ConfluenceScoreLight[]>();
   for (const s of scores) {
     const list = scoresByMatch.get(s.data.matchId) ?? [];
     list.push(s.data);
@@ -68,7 +73,7 @@ export default async function MatchesPage({ searchParams }: { searchParams: Prom
         </div>
       </div>
 
-      <FilterBar fields={["competition", "dateRange", "team", "edgeMin"]} />
+      <FilterBar fields={["competition", "dateRange", "team", "edgeMin"]} teamsByCompetition={teamsByCompetition} />
 
       <Section title="Upcoming" matches={upcoming} latestScoreFor={latestScoreFor} emptyText="No upcoming matches match these filters." />
       <Section title="Recent" matches={recent} latestScoreFor={latestScoreFor} emptyText="No resolved matches match these filters." />
@@ -84,7 +89,7 @@ function Section({
 }: {
   title: string;
   matches: Awaited<ReturnType<typeof getMatches>>;
-  latestScoreFor: (id: string) => ConfluenceScore | null;
+  latestScoreFor: (id: string) => ConfluenceScoreLight | null;
   emptyText: string;
 }) {
   return (

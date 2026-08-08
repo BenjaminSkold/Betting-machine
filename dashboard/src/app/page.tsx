@@ -1,6 +1,6 @@
 import Link from "next/link";
 import StatTile from "@/components/StatTile";
-import { getMatches, getPaperBets, getSystemStatus, getWallets } from "@/lib/data";
+import { getMatches, getPaperBets, getSystemStatus, getWalletCounts } from "@/lib/data";
 import { freshnessAge } from "@/lib/time";
 
 // Every page here reads live pipeline state -- without this, Next statically
@@ -10,11 +10,10 @@ import { freshnessAge } from "@/lib/time";
 export const dynamic = "force-dynamic";
 
 export default async function OverviewPage() {
-  const [matches, wallets, paperBets, status] = await Promise.all([getMatches(), getWallets(), getPaperBets(), getSystemStatus()]);
+  const [matches, walletCounts, paperBets, status] = await Promise.all([getMatches(), getWalletCounts(), getPaperBets(), getSystemStatus()]);
 
   const upcoming = matches.filter((m) => !m.data.resolved).length;
   const resolved = matches.filter((m) => m.data.resolved).length;
-  const watchlisted = wallets.filter((w) => w.data.tier === "watch").length;
   const settledBets = paperBets.filter((b) => b.data.outcome !== "pending");
   const bankroll = settledBets.reduce((sum, b) => sum + (b.data.pnl ?? 0), 0);
 
@@ -24,6 +23,15 @@ export default async function OverviewPage() {
     .filter((m) => m.data.resolved)
     .sort((a, b) => b.data.kickoffTime.localeCompare(a.data.kickoffTime))
     .slice(0, 5);
+
+  // The raw result field is "home"/"draw"/"away" -- meaningless without
+  // that match's own team names next to it (same fix as the bet log and
+  // match detail page already got).
+  function resultLabel(m: (typeof matches)[number]): string {
+    if (!m.data.result) return "—";
+    if (m.data.result === "draw") return "Draw";
+    return m.data.result === "home" ? m.data.homeTeam : m.data.awayTeam;
+  }
 
   return (
     <div className="max-w-5xl">
@@ -44,7 +52,7 @@ export default async function OverviewPage() {
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         <StatTile label="Upcoming matches" value={String(upcoming)} />
         <StatTile label="Resolved matches" value={String(resolved)} />
-        <StatTile label="Watchlisted wallets" value={`${watchlisted} / ${wallets.length}`} />
+        <StatTile label="Watchlisted wallets" value={`${walletCounts.watchlisted} / ${walletCounts.total}`} />
         <StatTile
           label="Fake bankroll"
           value={`$${bankroll.toFixed(2)}`}
@@ -78,7 +86,7 @@ export default async function OverviewPage() {
                   {m.data.homeTeam} vs. {m.data.awayTeam}
                 </div>
               </div>
-              <div className="shrink-0 text-sm text-[var(--text-secondary)]">{m.data.result ?? "—"}</div>
+              <div className="shrink-0 text-sm text-[var(--text-secondary)]">{resultLabel(m)}</div>
             </Link>
           ))}
         </div>

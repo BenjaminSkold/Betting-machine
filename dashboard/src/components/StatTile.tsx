@@ -1,4 +1,5 @@
 import AnimatedNumber from "./AnimatedNumber";
+import type { FormatMode } from "@/lib/format";
 import type { LucideIcon } from "lucide-react";
 
 // Stat tile per the dataviz skill's figure contract: label (sentence case,
@@ -7,7 +8,10 @@ import type { LucideIcon } from "lucide-react";
 //
 // `value` is a pre-formatted string (existing call sites, unchanged).
 // Passing `animate` + `format` instead renders the number counting up/down
-// to its new value rather than snapping -- opt-in per call site.
+// to its new value rather than snapping -- opt-in per call site. `format`
+// is a named mode (see lib/format.ts), not a function -- this crosses a
+// Server-to-Client-Component boundary from every page that uses it, and
+// functions can't cross that boundary.
 export default function StatTile({
   label,
   value,
@@ -20,7 +24,7 @@ export default function StatTile({
   label: string;
   value?: string;
   animate?: number;
-  format?: (n: number) => string;
+  format?: FormatMode;
   delta?: string;
   deltaGood?: boolean;
   icon?: LucideIcon;

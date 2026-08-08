@@ -1,9 +1,12 @@
+import Link from "next/link";
 import StatTile from "@/components/StatTile";
 import BankrollChart, { type BankrollPoint } from "@/components/BankrollChart";
 import TrustGate from "@/components/TrustGate";
 import FadeIn from "@/components/FadeIn";
-import { getMatches, getPaperBets } from "@/lib/data";
+import BacktestSandbox from "@/components/BacktestSandbox";
+import { getBacktestInputs, getMatches, getPaperBets } from "@/lib/data";
 import { MIN_SETTLED_BETS_TO_TRUST } from "@/lib/types";
+import type { Leg, Match } from "@/lib/types";
 import { edgeBucketLabel, favoriteUnderdogLabel, segmentStats, sortByBucketOrder, type Segment } from "@/lib/breakdown";
 
 export const dynamic = "force-dynamic";
@@ -13,8 +16,18 @@ function pct(x: number | null): string {
 }
 
 export default async function PerformancePage() {
-  const [bets, matches] = await Promise.all([getPaperBets(), getMatches()]);
+  const [bets, matches, backtestData] = await Promise.all([getPaperBets(), getMatches(), getBacktestInputs()]);
   const competitionByMatch = new Map(matches.map((m) => [m.id, m.data.competition]));
+  const matchById = new Map(matches.map((m) => [m.id, m.data]));
+
+  // The tracked "leg" (home/draw/away) means nothing without the match's own
+  // team names next to it -- this turns it into the actual team backed (or
+  // "Draw"), matching how EdgeBadge and the match detail page already show it.
+  function legLabel(match: Match | undefined, leg: Leg): string {
+    if (!match) return leg;
+    if (leg === "draw") return "Draw";
+    return leg === "home" ? match.homeTeam : match.awayTeam;
+  }
 
   const pending = bets.filter((b) => b.data.outcome === "pending");
   const voided = bets.filter((b) => b.data.outcome === "void");
@@ -49,9 +62,13 @@ export default async function PerformancePage() {
       </p>
 
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-        <StatTile label="Fake bankroll" animate={bankroll} format={(n) => `${n >= 0 ? "" : "-"}$${Math.abs(n).toFixed(2)}`} delta={decided.length > 0 ? `${decided.length} decided` : undefined} deltaGood={bankroll >= 0} />
-        <StatTile label="Win rate" animate={winRate !== null ? winRate * 100 : 0} format={(n) => (winRate !== null ? `${n.toFixed(1)}%` : "—")} />
-        <StatTile label="ROI" animate={roi !== null ? roi * 100 : 0} format={(n) => (roi !== null ? `${n.toFixed(1)}%` : "—")} deltaGood={roi !== null ? roi >= 0 : undefined} delta={roi !== null ? (roi >= 0 ? "profitable" : "down") : undefined} />
+        <StatTile label="Fake bankroll" animate={bankroll} format="money2" delta={decided.length > 0 ? `${decided.length} decided` : undefined} deltaGood={bankroll >= 0} />
+        {winRate !== null ? <StatTile label="Win rate" animate={winRate * 100} format="percent1" /> : <StatTile label="Win rate" value="—" />}
+        {roi !== null ? (
+          <StatTile label="ROI" animate={roi * 100} format="percent1" deltaGood={roi >= 0} delta={roi >= 0 ? "profitable" : "down"} />
+        ) : (
+          <StatTile label="ROI" value="—" />
+        )}
         <StatTile label="Pending / voided" value={`${pending.length} / ${voided.length}`} />
       </div>
 
@@ -60,6 +77,22 @@ export default async function PerformancePage() {
         <TrustGate n={decided.length} threshold={MIN_SETTLED_BETS_TO_TRUST}>
           <BankrollChart points={bankrollPoints} />
         </TrustGate>
+      </FadeIn>
+
+      <FadeIn className="mt-8">
+        <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-[var(--text-muted)]">What if I used a different threshold?</h2>
+        <p className="mb-3 text-xs text-[var(--text-secondary)]">
+          Same sandbox as the <Link href="/backtest" className="text-[var(--diverging-pos)] hover:underline">Backtest</Link> page, right here for
+          context — explores every frozen confluence score with a known outcome, not just the {decided.length + pending.length + voided.length} bets
+          above that actually cleared the live 5pp threshold. Doesn&apos;t change your real ledger.
+        </p>
+        {backtestData.length === 0 ? (
+          <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-1)] px-4 py-6 text-sm text-[var(--text-muted)]">
+            No scored, resolved matches yet — nothing to simulate against.
+          </div>
+        ) : (
+          <BacktestSandbox data={backtestData} />
+        )}
       </FadeIn>
 
       {decided.length > 0 && (
@@ -92,7 +125,8 @@ export default async function PerformancePage() {
             <thead>
               <tr className="border-b border-[var(--border)] text-left text-xs uppercase tracking-wide text-[var(--text-muted)]">
                 <th scope="col" className="px-4 py-3">Match</th>
-                <th scope="col" className="px-4 py-3">Leg</th>
+                <th scope="col" className="px-4 py-3">Backed</th>
+                <th scope="col" className="px-4 py-3">Placed</th>
                 <th scope="col" className="tabular px-4 py-3 text-right">Edge at bet</th>
                 <th scope="col" className="tabular px-4 py-3 text-right">Stake</th>
                 <th scope="col" className="px-4 py-3">Outcome</th>
@@ -102,23 +136,50 @@ export default async function PerformancePage() {
             <tbody>
               {bets
                 .sort((a, b) => b.data.placedAt.localeCompare(a.data.placedAt))
-                .map((b) => (
-                  <tr key={b.id} className="border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--page-plane)]">
-                    <td className="px-4 py-2.5 font-mono text-xs text-[var(--text-secondary)]">{b.data.matchId}</td>
-                    <td className="px-4 py-2.5 text-[var(--text-secondary)]">{b.data.trackedLeg}</td>
-                    <td className="tabular px-4 py-2.5 text-right text-[var(--text-primary)]">{(b.data.edgeAtBet * 100).toFixed(1)}pp</td>
-                    <td className="tabular px-4 py-2.5 text-right text-[var(--text-primary)]">${b.data.stake.toFixed(0)}</td>
-                    <td className="px-4 py-2.5">
-                      <StatusBadge outcome={b.data.outcome} />
-                    </td>
-                    <td
-                      className="tabular px-4 py-2.5 text-right font-medium"
-                      style={{ color: b.data.pnl === null ? "var(--text-muted)" : b.data.pnl >= 0 ? "var(--status-good-text)" : "var(--status-critical)" }}
-                    >
-                      {b.data.pnl === null ? "—" : `${b.data.pnl >= 0 ? "+" : ""}$${b.data.pnl.toFixed(2)}`}
-                    </td>
-                  </tr>
-                ))}
+                .map((b) => {
+                  const match = matchById.get(b.data.matchId);
+                  return (
+                    <tr key={b.id} className="border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--page-plane)]">
+                      <td className="px-4 py-2.5">
+                        {match ? (
+                          <Link href={`/matches/${b.data.matchId}`} className="hover:underline">
+                            <div className="text-[11px] uppercase tracking-wide text-[var(--text-muted)]">{match.competition}</div>
+                            <div className="text-[var(--text-primary)]">
+                              {match.homeTeam} <span className="text-[var(--text-muted)]">vs.</span> {match.awayTeam}
+                            </div>
+                            <div className="text-xs text-[var(--text-secondary)]">{new Date(match.kickoffTime).toLocaleDateString()}</div>
+                          </Link>
+                        ) : (
+                          <span className="font-mono text-xs text-[var(--text-secondary)]">{b.data.matchId}</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2.5 text-[var(--text-secondary)]">
+                        {legLabel(match, b.data.trackedLeg)}
+                        {b.data.source === "manual" && (
+                          <span
+                            className="ml-1.5 rounded-full px-1.5 py-0.5 text-[10px] font-medium"
+                            style={{ background: "var(--page-plane)", color: "var(--text-muted)" }}
+                            title="Placed by hand from the match detail page, not the automatic edge-threshold trigger"
+                          >
+                            manual
+                          </span>
+                        )}
+                      </td>
+                      <td className="tabular px-4 py-2.5 text-xs text-[var(--text-secondary)]">{new Date(b.data.placedAt).toLocaleString()}</td>
+                      <td className="tabular px-4 py-2.5 text-right text-[var(--text-primary)]">{(b.data.edgeAtBet * 100).toFixed(1)}pp</td>
+                      <td className="tabular px-4 py-2.5 text-right text-[var(--text-primary)]">${b.data.stake.toFixed(0)}</td>
+                      <td className="px-4 py-2.5">
+                        <StatusBadge outcome={b.data.outcome} />
+                      </td>
+                      <td
+                        className="tabular px-4 py-2.5 text-right font-medium"
+                        style={{ color: b.data.pnl === null ? "var(--text-muted)" : b.data.pnl >= 0 ? "var(--status-good-text)" : "var(--status-critical)" }}
+                      >
+                        {b.data.pnl === null ? "—" : `${b.data.pnl >= 0 ? "+" : ""}$${b.data.pnl.toFixed(2)}`}
+                      </td>
+                    </tr>
+                  );
+                })}
             </tbody>
           </table>
         </div>

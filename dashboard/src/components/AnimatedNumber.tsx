@@ -3,26 +3,29 @@
 import { useEffect, useRef } from "react";
 import { animate, useMotionValue, useMotionValueEvent } from "motion/react";
 import { useState } from "react";
+import { formatValue, type FormatMode } from "@/lib/format";
 
 // Counts up/down to `value` rather than snapping -- the Dexscreener/Stripe
-// "numbers are alive" feeling. `format` renders the animating number (so
-// callers can add "%", "$", commas, sign, etc.); the animation only ever
-// runs from the previous rendered value to the new one, so a value that
-// hasn't changed doesn't replay on unrelated re-renders.
+// "numbers are alive" feeling. `format` is a named mode, not a function --
+// this component (and its callers, StatTile included) gets constructed
+// from Server Component pages, and a function prop can't cross that
+// boundary (fails at runtime in production, not just a lint warning). The
+// animation only ever runs from the previous rendered value to the new
+// one, so a value that hasn't changed doesn't replay on unrelated re-renders.
 export default function AnimatedNumber({
   value,
-  format = (n) => n.toFixed(0),
+  format = "integer",
   durationSec = 0.6,
 }: {
   value: number;
-  format?: (n: number) => string;
+  format?: FormatMode;
   durationSec?: number;
 }) {
   const motionValue = useMotionValue(value);
-  const [display, setDisplay] = useState(() => format(value));
+  const [display, setDisplay] = useState(() => formatValue(format, value));
   const prevValue = useRef(value);
 
-  useMotionValueEvent(motionValue, "change", (latest) => setDisplay(format(latest)));
+  useMotionValueEvent(motionValue, "change", (latest) => setDisplay(formatValue(format, latest)));
 
   useEffect(() => {
     // prefers-reduced-motion: jump straight to the value, no animation.

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { formatValue, type FormatMode } from "@/lib/format";
 
 export interface BarDatum {
   label: string;
@@ -14,17 +15,21 @@ const MARGIN = { top: 20, right: 16, bottom: 32, left: 48 };
 const BAR_MAX_THICKNESS = 24; // dataviz skill: bars never fill their slot
 const MIN_TRUST_N = 8; // matches rankWallets.js's own activity bar -- a bucket this thin is noise, not signal
 
+// `formatMode` is a named mode (lib/format.ts), not a function -- this
+// component is constructed from Server Component pages, and a function
+// prop can't cross that boundary.
 export default function BarChart({
   data,
-  valueFormat = (v) => v.toFixed(1),
+  formatMode = "signedPercent1",
   baseline = 0,
   unit = "",
 }: {
   data: BarDatum[];
-  valueFormat?: (v: number) => string;
+  formatMode?: FormatMode;
   baseline?: number;
   unit?: string;
 }) {
+  const valueFormat = (v: number) => formatValue(formatMode, v);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
 
   if (data.length === 0) {

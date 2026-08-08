@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutGrid, CalendarDays, Wallet, ArrowLeftRight, Target, GitCompareArrows, Timer, TrendingUp, Menu, X } from "lucide-react";
+import { LayoutGrid, CalendarDays, Wallet, ArrowLeftRight, Target, GitCompareArrows, Timer, SlidersHorizontal, TrendingUp, Menu, X } from "lucide-react";
 import ThemeToggle from "./ThemeToggle";
 
 const PRIMARY = [
@@ -17,6 +17,7 @@ const ANALYSIS = [
   { href: "/calibration", label: "Calibration", icon: Target },
   { href: "/edge-segmentation", label: "Edge segmentation", icon: GitCompareArrows },
   { href: "/timing-checkpoints", label: "Timing checkpoints", icon: Timer },
+  { href: "/backtest", label: "Backtest", icon: SlidersHorizontal },
 ];
 
 // Kept in its own group, visually separated by a divider from the wallet

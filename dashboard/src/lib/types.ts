@@ -26,6 +26,8 @@ export interface TradeRow {
   wallet: string;
   side: string;
   outcome: string;
+  leg: Leg | null; // which leg (home/draw/away) this trade's conditionId maps to
+  won: boolean | null; // null if the match isn't resolved yet
   size: number;
   price: number;
   timestamp: number;
@@ -61,6 +63,8 @@ export interface WalletSlice {
   winRate: number | null;
   roi: number | null;
   usedFallback: boolean;
+  pnl: number; // real $ made/lost in this slice -- always the actual total, never shrunk/fallback
+  stake: number; // real $ risked in this slice
 }
 
 // Early-half-vs-recent-half comparison of a wallet's own shrunk win rate —
@@ -77,6 +81,8 @@ export interface Wallet {
   totalResolvedTrades: number;
   aggregateWinRate: number;
   aggregateROI: number | null;
+  aggregatePnl: number;
+  aggregateStake: number;
   tier: "watch" | "unranked";
   bySlice: {
     byCompetition: Record<string, WalletSlice>;
@@ -97,7 +103,8 @@ export interface ContributingWallet {
 
 export interface LegBreakdown {
   score: number;
-  marketImpliedProbability: number | null;
+  marketImpliedProbability: number | null; // raw, tradeable price
+  marketFairProbability: number | null; // de-vigged -- what edge is actually measured against
   watchlistedTradeCount: number;
   watchlistedVolume: number;
   contributingWallets: ContributingWallet[];
@@ -129,6 +136,7 @@ export interface PaperBet {
   pnl: number | null;
   placedAt: string;
   settledAt: string | null;
+  source: "auto" | "manual"; // auto: paperBets.js's edge-threshold trigger. manual: placed by hand from the match detail page.
 }
 
 // PROJECT.md's "When you're allowed to trust the results" — don't present

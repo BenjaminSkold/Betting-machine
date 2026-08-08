@@ -5,6 +5,7 @@ import { getMatch, getMatchScores, getMatchTrades } from "@/lib/data";
 import PriceHistoryChart, { type PricePoint } from "@/components/PriceHistoryChart";
 import EdgeBadge from "@/components/EdgeBadge";
 import FadeIn from "@/components/FadeIn";
+import ManualBetForm from "@/components/ManualBetForm";
 import type { Leg } from "@/lib/types";
 import { isValidMatchId } from "@/lib/validate";
 
@@ -40,7 +41,8 @@ export default async function MatchDetailPage({ params }: { params: Promise<{ ma
 
   const [scores, trades] = await Promise.all([getMatchScores(matchId), getMatchTrades(matchId)]);
   const sortedScores = [...scores].sort((a, b) => b.data.minutesBeforeKickoff - a.data.minutesBeforeKickoff);
-  const latestScore = [...scores].sort((a, b) => a.data.minutesBeforeKickoff - b.data.minutesBeforeKickoff)[0]?.data;
+  const latestScoreEntry = [...scores].sort((a, b) => a.data.minutesBeforeKickoff - b.data.minutesBeforeKickoff)[0];
+  const latestScore = latestScoreEntry?.data;
 
   const ids = match.data.marketConditionIds;
   const home = legSeries(trades, ids?.home);
@@ -88,7 +90,15 @@ export default async function MatchDetailPage({ params }: { params: Promise<{ ma
         <div className="flex flex-col gap-3">
           {sortedScores.map((s, i) => (
             <FadeIn key={s.id} index={i}>
-              <ScoreCard score={s.data} legLabel={legLabel} />
+              <ScoreCard
+                score={s.data}
+                legLabel={legLabel}
+                // Betting is only offered against the CURRENT checkpoint --
+                // every earlier one reflects a market price that's since
+                // moved, so acting on it now wouldn't get that price anyway.
+                canBet={!match.data.resolved && s.id === latestScoreEntry?.id}
+                scoreId={s.id}
+              />
             </FadeIn>
           ))}
         </div>
@@ -140,7 +150,33 @@ export default async function MatchDetailPage({ params }: { params: Promise<{ ma
   );
 }
 
-function ScoreCard({ score, legLabel }: { score: Awaited<ReturnType<typeof getMatchScores>>[number]["data"]; legLabel: Record<Leg, string> }) {
+function ScoreCard({
+  score,
+  legLabel,
+  canBet = false,
+  scoreId,
+}: {
+  score: Awaited<ReturnType<typeof getMatchScores>>[number]["data"];
+  legLabel: Record<Leg, string>;
+  canBet?: boolean;
+  scoreId: string;
+}) {
+  const legEdges: Record<Leg, number | null> = {
+    home: score.breakdown.home.edge,
+    draw: score.breakdown.draw.edge,
+    away: score.breakdown.away.edge,
+  };
+  const legPrices: Record<Leg, number | null> = {
+    home: score.breakdown.home.marketImpliedProbability,
+    draw: score.breakdown.draw.marketImpliedProbability,
+    away: score.breakdown.away.marketImpliedProbability,
+  };
+  // Polymarket shares always resolve to exactly $1 -- buying at `price`
+  // returns 1/price for every $1 staked if it wins, nothing if it doesn't.
+  function payoutMultiplier(price: number | null): string {
+    return price !== null && price > 0 ? `${(1 / price).toFixed(2)}x` : "—";
+  }
+
   return (
     <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-1)] p-4 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-1">
@@ -163,7 +199,10 @@ function ScoreCard({ score, legLabel }: { score: Awaited<ReturnType<typeof getMa
                 {b.edge !== null ? `${b.edge >= 0 ? "+" : ""}${(b.edge * 100).toFixed(1)}pp` : "—"}
               </div>
               <div className="text-xs text-[var(--text-muted)]">
-                {pct(b.probabilityEstimate)} vs mkt {pct(b.marketImpliedProbability)}
+                {pct(b.probabilityEstimate)} vs fair {pct(b.marketFairProbability)}
+              </div>
+              <div className="text-xs text-[var(--text-muted)]">
+                pays <span className="font-medium text-[var(--text-secondary)]">{payoutMultiplier(b.marketImpliedProbability)}</span> at the current price ({pct(b.marketImpliedProbability)})
               </div>
               <div className="text-xs text-[var(--text-muted)]">
                 {b.watchlistedTradeCount} watchlisted trade(s), ${b.watchlistedVolume.toFixed(0)} vol
@@ -172,6 +211,14 @@ function ScoreCard({ score, legLabel }: { score: Awaited<ReturnType<typeof getMa
           );
         })}
       </div>
+      <p className="mt-2 text-xs text-[var(--text-muted)]">
+        *pp = percentage points, a plain difference between two percentages (60% → 65% is +5pp) — not a percent change. &quot;Fair&quot; probability
+        de-vigs the market&apos;s three raw prices (home/draw/away each trade as their own market, so they don&apos;t need to sum to 100% — the
+        excess is the market&apos;s built-in edge, not a real 4th outcome) before comparing against our estimate, so a heavy favorite&apos;s raw
+        price isn&apos;t mistaken for a real edge.
+      </p>
+
+      {canBet && <ManualBetForm scoreId={scoreId} legLabel={legLabel} legEdges={legEdges} legPrices={legPrices} defaultLeg={score.trackedLeg} />}
 
       <details className="mt-3">
         <summary className="cursor-pointer text-xs text-[var(--text-secondary)]">Contributing wallets</summary>
