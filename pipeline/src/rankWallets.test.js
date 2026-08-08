@@ -31,15 +31,16 @@ check("legFor unknown", legFor({ conditionId: "X" }, match), null);
 // Wallet W2 bought Yes on the away leg -> should lose.
 // Wallet W3 bought No on the home leg -> should lose (home leg's Yes won, so betting No on it loses).
 const fakeMatch = {
+  id: "M1",
   competition: "EPL",
   homeTeam: "Arsenal",
   awayTeam: "Chelsea",
   result: "home",
   marketConditionIds: { home: "H", draw: "D", away: "A" },
   trades: [
-    { wallet: "W1", side: "BUY", price: 0.6, size: 100, outcome: "Yes", conditionId: "H" },
-    { wallet: "W2", side: "BUY", price: 0.3, size: 100, outcome: "Yes", conditionId: "A" },
-    { wallet: "W3", side: "BUY", price: 0.5, size: 100, outcome: "No", conditionId: "H" },
+    { wallet: "W1", side: "BUY", price: 0.6, size: 100, outcome: "Yes", conditionId: "H", timestamp: 1 },
+    { wallet: "W2", side: "BUY", price: 0.3, size: 100, outcome: "Yes", conditionId: "A", timestamp: 1 },
+    { wallet: "W3", side: "BUY", price: 0.5, size: 100, outcome: "No", conditionId: "H", timestamp: 1 },
   ],
 };
 const rows = buildTradeRows([fakeMatch]);
@@ -53,6 +54,47 @@ check("W2 loses (bought Yes on losing away leg)", w2.win, false);
 check("W2 team slice", w2.team, "Chelsea");
 check("W3 loses (bought No on the leg that won)", w3.win, false);
 check("W3 team slice", w3.team, "Arsenal");
+
+// --- buildTradeRows: many fills by the same wallet on the same match
+// collapse into ONE row (the actual bug a live wallet exposed: 340 fills
+// on a single match inflating "trades" with zero real decision diversity).
+const manyFillsMatch = {
+  id: "M1",
+  competition: "EPL",
+  homeTeam: "Arsenal",
+  awayTeam: "Chelsea",
+  result: "home",
+  marketConditionIds: { home: "H", draw: "D", away: "A" },
+  trades: [
+    { wallet: "W4", side: "BUY", price: 0.5, size: 50, outcome: "Yes", conditionId: "H", timestamp: 100 },
+    { wallet: "W4", side: "BUY", price: 0.5, size: 50, outcome: "Yes", conditionId: "H", timestamp: 200 },
+  ],
+};
+const w4Rows = buildTradeRows([manyFillsMatch]);
+check("many fills on one match by one wallet collapse to a single row", w4Rows.length, 1);
+const w4 = w4Rows[0];
+// Each fill: BUY 50 @ 0.5, wins -> pnl=50*(1-0.5)=25, stake=0.5*50=25. Two fills sum to 50/50.
+check("aggregated pnl sums across fills, not just the last one", w4.pnl, 50);
+check("aggregated stake sums across fills", w4.stake, 50);
+check("aggregated win reflects net pnl, not fill count", w4.win, true);
+check("aggregated row keeps the earliest fill's timestamp", w4.timestamp, 100);
+
+// --- buildTradeRows: a SELL that resolves against the seller is a real
+// loss, even though the raw outcome flag ("Yes") matches the winning leg --
+// the old per-trade model used that raw flag as "win", ignoring BUY/SELL
+// direction, and mislabeled this case a win.
+const sellMatch = {
+  id: "M2",
+  competition: "EPL",
+  homeTeam: "Arsenal",
+  awayTeam: "Chelsea",
+  result: "home",
+  marketConditionIds: { home: "H", draw: "D", away: "A" },
+  trades: [{ wallet: "W5", side: "SELL", price: 0.4, size: 100, outcome: "Yes", conditionId: "H", timestamp: 1 }],
+};
+const w5 = buildTradeRows([sellMatch])[0];
+check("SELL that resolves against the seller is a loss, not a win", w5.win, false);
+check("SELL loss pnl matches pnlAndStake's own SELL-win(for side) branch", w5.pnl, -60);
 
 // --- shrink ---
 // n=0 -> exactly the prior

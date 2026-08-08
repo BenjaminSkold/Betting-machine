@@ -67,13 +67,34 @@ CREATE TABLE wallets (
   total_resolved_trades INTEGER NOT NULL DEFAULT 0,
   aggregate_win_rate REAL,
   aggregate_roi REAL,
+  aggregate_pnl REAL,                      -- total $ made/lost across every resolved match-level bet
+  aggregate_stake REAL,                    -- total $ risked -- aggregate_pnl / aggregate_stake == aggregate_roi
   tier TEXT NOT NULL DEFAULT 'unranked',   -- 'watch' | 'unranked'
-  by_slice TEXT NOT NULL DEFAULT '{}',     -- JSON {byCompetition, byTeam, byMonth}
+  by_slice TEXT NOT NULL DEFAULT '{}',     -- JSON {byCompetition, byTeam, byMonth}, each slice also carries its own pnl/stake
   trend TEXT NOT NULL DEFAULT '{}',        -- JSON {early, recent, delta, label}
   last_updated TEXT NOT NULL
 );
 
 CREATE INDEX wallets_tier_idx ON wallets (tier);
+CREATE INDEX wallets_tier_roi_idx ON wallets (tier, aggregate_roi DESC); -- the wallets leaderboard's own default sort; without this the ORDER BY did an in-memory sort over every tier:"watch" row (3s+ once that tier passed ~20k rows)
+
+-- Written by rankWallets.js while it's already scanning every resolved
+-- match's trades (no extra R2 reads) -- lets the wallet detail page look up
+-- exactly which matches a wallet touched instead of scanning every match's
+-- R2 file to find out. That scan was capped to the 150 most recent matches
+-- as a stopgap (unbounded, it was 60s+); this index is the real fix the
+-- cap's own comment said it needed, and removes the cap's real cost: a
+-- wallet whose entire history predates the 150 most-recent matches
+-- league-wide (a real case once a new season has only a handful of
+-- matches so far) was invisible under the cap.
+CREATE TABLE wallet_matches (
+  wallet TEXT NOT NULL,
+  match_id TEXT NOT NULL REFERENCES matches (event_id),
+  PRIMARY KEY (wallet, match_id)
+);
+
+CREATE INDEX wallet_matches_wallet_idx ON wallet_matches (wallet);
+CREATE INDEX wallet_matches_match_id_idx ON wallet_matches (match_id); -- writeWalletMatchIndex's own "skip already-indexed matches" check
 
 CREATE TABLE confluence_scores (
   id TEXT PRIMARY KEY,                     -- {matchId}_{snapshotId}
@@ -92,7 +113,7 @@ CREATE TABLE confluence_scores (
 CREATE INDEX confluence_scores_match_id_idx ON confluence_scores (match_id);
 
 CREATE TABLE paper_bets (
-  id TEXT PRIMARY KEY,                     -- same id as the confluence_scores row it came from
+  id TEXT PRIMARY KEY,                     -- auto bets: same id as the confluence_scores row they came from. manual bets: "manual_<uuid>", since more than one can target the same score.
   match_id TEXT NOT NULL REFERENCES matches (event_id),
   score_id TEXT NOT NULL REFERENCES confluence_scores (id),
   tracked_leg TEXT,
@@ -102,7 +123,8 @@ CREATE TABLE paper_bets (
   outcome TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'win' | 'loss' | 'void'
   pnl REAL,
   placed_at TEXT NOT NULL,
-  settled_at TEXT
+  settled_at TEXT,
+  source TEXT NOT NULL DEFAULT 'auto'      -- 'auto' (paperBets.js, edge-threshold triggered) | 'manual' (placed by hand from the match detail page)
 );
 
 CREATE INDEX paper_bets_outcome_idx ON paper_bets (outcome);

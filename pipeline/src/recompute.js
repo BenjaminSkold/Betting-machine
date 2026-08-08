@@ -11,11 +11,12 @@
 // full-rescan logic the daily job uses is simpler and can't drift out of
 // sync with it. Cheap enough at personal-project scale even if several
 // matches resolve close together and each triggers its own recompute.
-import { loadResolvedMatchesWithTrades, buildTradeRows, rankWallets, upsertWallets, MIN_TRADES } from "./rankWallets.js";
+import { loadResolvedMatchesWithTrades, buildTradeRows, rankWallets, upsertWallets, writeWalletMatchIndex, MIN_TRADES } from "./rankWallets.js";
 
 export async function recomputeWalletsOnResolution(client, matchId) {
   console.log(`  [recompute] match ${matchId} resolved — running an immediate Tier 2 recompute...`);
   const matches = await loadResolvedMatchesWithTrades(client);
+  await writeWalletMatchIndex(client, matches);
   const rows = buildTradeRows(matches);
   if (rows.length === 0) return 0;
 

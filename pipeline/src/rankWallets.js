@@ -114,11 +114,20 @@ export async function loadOneResolvedMatchWithTrades(client, matchId) {
   };
 }
 
-// Flattens every (wallet, trade, match) triple into a single row with the
-// win/pnl/stake/slice info already resolved, so aggregation below is just
-// grouping and summing.
+// Aggregates every (wallet, match) pair into a single row -- NOT one row
+// per raw trade/fill. Confirmed live: Polymarket's CLOB fills one order
+// across many small trades, so a wallet building ONE position on ONE match
+// can show up as hundreds of "trades" (one real case: 340 fills, all one
+// side of one match). Counting per-fill let that single match single-
+// handedly clear the activity bar with zero real decision diversity, and
+// skewed win rate/ROI by the outcome of one event weighted as if it were
+// hundreds of independent ones. `win` is `netPnl > 0` for the aggregated
+// position, not the old per-trade "does the raw outcome flag match the
+// winning leg" check -- that older check ignored BUY vs SELL direction
+// entirely, so a SELL that resolved against the seller (a real loss) was
+// mislabeled a win. Aggregating by net pnl fixes both issues at once.
 function buildTradeRows(matches) {
-  const rows = [];
+  const byWalletMatch = new Map();
   for (const match of matches) {
     for (const trade of match.trades) {
       const leg = legFor(trade, match);
@@ -126,16 +135,28 @@ function buildTradeRows(matches) {
       const legWon = leg === match.result;
       const sideWon = (trade.outcome === "Yes") === legWon;
       const { pnl, stake } = pnlAndStake(trade, sideWon);
-      rows.push({
-        wallet: trade.wallet,
-        win: sideWon,
-        pnl,
-        stake,
-        competition: match.competition,
-        team: leg === "home" ? match.homeTeam : leg === "away" ? match.awayTeam : null,
-        timestamp: trade.timestamp,
-      });
+
+      const key = `${trade.wallet}|${match.id}`;
+      if (!byWalletMatch.has(key)) {
+        byWalletMatch.set(key, {
+          wallet: trade.wallet,
+          competition: match.competition,
+          team: leg === "home" ? match.homeTeam : leg === "away" ? match.awayTeam : null,
+          pnl: 0,
+          stake: 0,
+          timestamp: trade.timestamp,
+        });
+      }
+      const agg = byWalletMatch.get(key);
+      agg.pnl += pnl;
+      agg.stake += stake;
+      agg.timestamp = Math.min(agg.timestamp, trade.timestamp); // earliest fill = when this bet was placed
     }
+  }
+
+  const rows = [];
+  for (const agg of byWalletMatch.values()) {
+    rows.push({ wallet: agg.wallet, win: agg.pnl > 0, pnl: agg.pnl, stake: agg.stake, competition: agg.competition, team: agg.team, timestamp: agg.timestamp });
   }
   return rows;
 }
@@ -151,6 +172,7 @@ function summarize(rows, prior) {
     shrunkWinRate: shrink(wins, n, prior),
     roi: stake > 0 ? pnl / stake : null,
     pnl,
+    stake,
   };
 }
 
@@ -171,6 +193,13 @@ function sliceBy(rows, keyFn, prior, fallback) {
       winRate: enough ? summary.shrunkWinRate : fallback.shrunkWinRate,
       roi: enough ? summary.roi : fallback.roi,
       usedFallback: !enough,
+      // Dollar totals are always the real, actual numbers regardless of
+      // sample size -- shrinkage/fallback only applies to the RATE
+      // (win rate/ROI), which is what gets noisy on a thin sample. "You
+      // made $47 on Chelsea over 3 trades" is simply true; there's nothing
+      // to regularize about a sum.
+      pnl: summary.pnl,
+      stake: summary.stake,
     };
   }
   return out;
@@ -237,6 +266,8 @@ export function rankWallets(rows, existingByWallet = new Map()) {
       totalResolvedTrades: aggregate.trades,
       aggregateWinRate: aggregate.shrunkWinRate,
       aggregateROI: aggregate.roi,
+      aggregatePnl: aggregate.pnl,
+      aggregateStake: aggregate.stake,
       tier,
       bySlice: {
         byCompetition: sliceBy(walletRows, (r) => r.competition, globalPrior, aggregate),
@@ -251,7 +282,18 @@ export function rankWallets(rows, existingByWallet = new Map()) {
 }
 
 const WALLET_UPSERT_CHUNK = 100; // conservative re: SQLite's bind-parameter ceiling (8 cols/row)
-const WALLET_COLS = ["address", "total_resolved_trades", "aggregate_win_rate", "aggregate_roi", "tier", "by_slice", "trend", "last_updated"];
+const WALLET_COLS = [
+  "address",
+  "total_resolved_trades",
+  "aggregate_win_rate",
+  "aggregate_roi",
+  "aggregate_pnl",
+  "aggregate_stake",
+  "tier",
+  "by_slice",
+  "trend",
+  "last_updated",
+];
 
 export async function upsertWallets(client, wallets) {
   for (let i = 0; i < wallets.length; i += WALLET_UPSERT_CHUNK) {
@@ -260,7 +302,18 @@ export async function upsertWallets(client, wallets) {
     const args = [];
     for (const w of group) {
       values.push(`(${WALLET_COLS.map(() => "?").join(", ")})`);
-      args.push(w.wallet, w.totalResolvedTrades, w.aggregateWinRate, w.aggregateROI, w.tier, JSON.stringify(w.bySlice), JSON.stringify(w.trend), w.lastUpdated);
+      args.push(
+        w.wallet,
+        w.totalResolvedTrades,
+        w.aggregateWinRate,
+        w.aggregateROI,
+        w.aggregatePnl,
+        w.aggregateStake,
+        w.tier,
+        JSON.stringify(w.bySlice),
+        JSON.stringify(w.trend),
+        w.lastUpdated
+      );
     }
     await client.execute({
       sql: `INSERT INTO wallets (${WALLET_COLS.join(", ")}) VALUES ${values.join(", ")}
@@ -268,6 +321,8 @@ export async function upsertWallets(client, wallets) {
               total_resolved_trades = excluded.total_resolved_trades,
               aggregate_win_rate = excluded.aggregate_win_rate,
               aggregate_roi = excluded.aggregate_roi,
+              aggregate_pnl = excluded.aggregate_pnl,
+              aggregate_stake = excluded.aggregate_stake,
               tier = excluded.tier,
               by_slice = excluded.by_slice,
               trend = excluded.trend,
@@ -278,11 +333,58 @@ export async function upsertWallets(client, wallets) {
   }
 }
 
+const WALLET_MATCH_CHUNK = 400; // 2 params/row, well under any bind-parameter ceiling
+
+// Every (wallet, match) pair this run's matches touched -- written while
+// matches (with trades already read from R2) are in hand, so this costs no
+// extra R2 reads. Lets the wallet detail page look up exactly which matches
+// a wallet traded on instead of scanning every match's R2 file to find out.
+//
+// Skips any match already indexed: a resolved match's trade history never
+// changes, so there's nothing new to write for it. Matters most for
+// recompute.js, which calls this after EVERY match resolution -- without
+// this skip, each of those calls would re-attempt writing the FULL
+// historical index (confirmed live: 300k+ rows on a mid-sized dataset),
+// when in the common case there's exactly one new match to account for.
+export async function writeWalletMatchIndex(client, matches) {
+  if (matches.length === 0) return 0;
+  const candidateIds = matches.map((m) => m.id);
+  const placeholders = candidateIds.map(() => "?").join(", ");
+  const { rows: already } = await client.execute({
+    sql: `SELECT DISTINCT match_id AS "matchId" FROM wallet_matches WHERE match_id IN (${placeholders})`,
+    args: candidateIds,
+  });
+  const alreadyIndexed = new Set(already.map((r) => r.matchId));
+  const newMatches = matches.filter((m) => !alreadyIndexed.has(m.id));
+  if (newMatches.length === 0) return 0;
+
+  const pairs = new Set();
+  for (const match of newMatches) {
+    for (const trade of match.trades) pairs.add(`${trade.wallet}|${match.id}`);
+  }
+  const list = [...pairs].map((key) => {
+    const i = key.indexOf("|");
+    return { wallet: key.slice(0, i), matchId: key.slice(i + 1) };
+  });
+
+  for (let i = 0; i < list.length; i += WALLET_MATCH_CHUNK) {
+    const group = list.slice(i, i + WALLET_MATCH_CHUNK);
+    const values = group.map(() => "(?, ?)").join(", ");
+    const args = group.flatMap((p) => [p.wallet, p.matchId]);
+    await client.execute({ sql: `INSERT OR IGNORE INTO wallet_matches (wallet, match_id) VALUES ${values}`, args });
+  }
+  return list.length;
+}
+
 async function main() {
   const client = getClient();
   console.log("Loading resolved matches + trades...");
   const matches = await loadResolvedMatchesWithTrades(client);
   console.log(`${matches.length} resolved match(es) with a determined result.`);
+
+  console.log("Writing wallet -> match index...");
+  const pairCount = await writeWalletMatchIndex(client, matches);
+  console.log(`${pairCount} (wallet, match) pair(s) indexed.`);
 
   const rows = buildTradeRows(matches);
   console.log(`${rows.length} trade row(s) joined to a match result.`);

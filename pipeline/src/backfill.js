@@ -10,6 +10,7 @@
 import { getClient, upsertMatch, insertSnapshot, getMatchRow, withTransaction } from "./db.js";
 import { writeTradeBatch } from "./tradeArchive.js";
 import { findResolvedMatches, getAllTrades, getPriceHistory, clobTokenIdsFor, tradeKey, stripCompetitionPrefix } from "./polymarket.js";
+import { canonicalTeamName } from "./teamNames.js";
 
 const COMPETITIONS = ["EPL", "UCL", "UEL"];
 // Historical price-history reconstruction only has fixed sample points to
@@ -30,14 +31,19 @@ function sleep(ms) {
 }
 
 function classifyMarkets(event) {
-  const [homeTeam, awayTeam] = stripCompetitionPrefix(event.title).split(" vs. ").map((s) => s.trim());
+  const [rawHomeTeam, rawAwayTeam] = stripCompetitionPrefix(event.title).split(" vs. ").map((s) => s.trim());
   const found = {};
   for (const m of event.markets) {
+    // Matched against the RAW names -- each market's own question text
+    // contains whatever Polymarket's event title used, not the
+    // canonicalized name below.
     if (/end in a draw/i.test(m.question)) found.draw = m;
-    else if (m.question.startsWith(`Will ${homeTeam} `)) found.home = m;
-    else if (m.question.startsWith(`Will ${awayTeam} `)) found.away = m;
+    else if (m.question.startsWith(`Will ${rawHomeTeam} `)) found.home = m;
+    else if (m.question.startsWith(`Will ${rawAwayTeam} `)) found.away = m;
   }
-  return { homeTeam, awayTeam, ...found };
+  // Canonicalized here, at the boundary -- see teamNames.js for why the
+  // same club shows up under many raw spellings upstream.
+  return { homeTeam: canonicalTeamName(rawHomeTeam), awayTeam: canonicalTeamName(rawAwayTeam), ...found };
 }
 
 function yesPrice(market) {

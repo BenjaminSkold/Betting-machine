@@ -9,9 +9,10 @@
     "collect": "node src/collect.js",
     "backfill": "node src/backfill.js",
     "rank-wallets": "node src/rankWallets.js",
+    "migrate-team-names": "node src/migrateTeamNames.js",
     "score-matches": "node src/scoreMatches.js",
     "paper-bets": "node src/paperBets.js",
-    "test": "node src/polymarket.test.js && node src/collect.test.js && node src/rankWallets.test.js && node src/scoreMatches.test.js && node src/paperBets.test.js"
+    "test": "node src/polymarket.test.js && node src/collect.test.js && node src/rankWallets.test.js && node src/scoreMatches.test.js && node src/paperBets.test.js && node src/teamNames.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.687.0",
