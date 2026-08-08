@@ -62,6 +62,24 @@ const noSignalLopsided = computeMatchScore([], walletsByAddress, lopsidedPrices,
 check("no signal + lopsided price: probEstimate equals raw market price (not clipped)", noSignalLopsided.breakdown.home.probabilityEstimate, 0.995);
 check("no signal + lopsided price: edge is exactly 0, not a clip artifact", noSignalLopsided.breakdown.home.edge, 0);
 
+// --- Regression: market prices with real overround (raw sum != 1, as
+// actually observed live -- 84%+49%+4.5%=137.5% on a real match) must be
+// de-vigged before comparing against our own (always-renormalized to sum
+// to 1) probability estimate. Before this fix, a heavy favorite looked
+// systematically "overpriced" by roughly the overround's size even with
+// ZERO watchlisted signal -- found live as a -22.9pp "edge" against
+// Arsenal with no wallet activity driving it at all.
+const overroundPrices = { home: 0.84, draw: 0.49, away: 0.045 };
+const overroundTotal = 0.84 + 0.49 + 0.045;
+const noSignalOverround = computeMatchScore([], walletsByAddress, overroundPrices, marketConditionIds);
+check("no signal + overround: fair probability is de-vigged, not raw", noSignalOverround.breakdown.home.marketFairProbability, 0.84 / overroundTotal);
+check("no signal + overround: edge is exactly 0 despite the overround", noSignalOverround.breakdown.home.edge, 0);
+check(
+  "no signal + overround: raw marketImpliedProbability is untouched (still the tradeable price)",
+  noSignalOverround.breakdown.home.marketImpliedProbability,
+  0.84
+);
+
 // --- Directionality: SELL Yes should count as betting AGAINST that leg.
 const sellTrades = [{ wallet: "W1", side: "SELL", outcome: "Yes", size: 100, conditionId: "H", timestamp: 0 }];
 const sellResult = computeMatchScore(sellTrades, walletsByAddress, marketPrices, marketConditionIds);

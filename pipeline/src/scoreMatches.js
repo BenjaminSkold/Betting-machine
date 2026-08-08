@@ -72,6 +72,23 @@ export function computeMatchScore(trades, walletsByAddress, marketPrices, market
     totalVolume += trade.size;
   }
 
+  // Each leg trades as its own separate Yes/No market on Polymarket, so
+  // their three raw prices have no reason to sum to exactly 1 -- the
+  // difference from 1 is the market's overround (vig), same as summing the
+  // implied probabilities of moneyline odds. Confirmed live: a real match's
+  // three raw prices summed to 137.5%. Our own estimate gets renormalized
+  // to sum to exactly 1 below (rawTotal); comparing that against the
+  // market's un-renormalized raw price meant every leg looked "overpriced"
+  // by roughly the overround's size, EVEN WITH ZERO watchlisted signal --
+  // directly contradicting this function's own "zero signal -> zero edge"
+  // invariant (see the shift===0 comment below). De-vigging the market's
+  // three prices the same way fixes the comparison to apples-to-apples.
+  const marketRawTotal = ["home", "draw", "away"].reduce((sum, leg) => sum + (marketPrices[leg] ?? 0), 0);
+  function fairMarketProbability(rawPrice) {
+    if (rawPrice === null || rawPrice === undefined) return rawPrice ?? null;
+    return marketRawTotal > 0 ? rawPrice / marketRawTotal : rawPrice;
+  }
+
   const breakdown = {};
   let bestLeg = null;
   let bestAbsEdge = -1;
@@ -87,16 +104,18 @@ export function computeMatchScore(trades, walletsByAddress, marketPrices, market
     const normalizedSignal = totalVolume > 0 ? rawSignal / totalVolume : 0;
 
     const marketPrice = marketPrices[leg];
+    const marketFair = fairMarketProbability(marketPrice);
     const shift = MAX_SHIFT * (normalizedSignal / MAX_SKILL_WEIGHT);
-    // With zero signal (shift === 0), pass the market price through
-    // unclipped — a system with no signal must report no edge, not a clip
-    // artifact from a lopsided-but-legitimate favorite.
-    const rawEstimate =
-      marketPrice === null || marketPrice === undefined ? null : shift === 0 ? marketPrice : clip(marketPrice + shift, 0.01, 0.99);
+    // With zero signal (shift === 0), pass the market's OWN fair (de-vigged)
+    // probability through unclipped -- a system with no signal must report
+    // no edge against the fair price, not a clip artifact and not an
+    // overround artifact either.
+    const rawEstimate = marketFair === null ? null : shift === 0 ? marketFair : clip(marketFair + shift, 0.01, 0.99);
 
     breakdown[leg] = {
       score: normalizedSignal,
-      marketImpliedProbability: marketPrice,
+      marketImpliedProbability: marketPrice, // raw, tradeable price -- what you'd actually pay
+      marketFairProbability: marketFair, // de-vigged -- what "edge" is actually measured against
       rawEstimate,
       watchlistedTradeCount: legTrades.length,
       watchlistedVolume: legTrades.reduce((s, t) => s + t.size, 0),
@@ -107,8 +126,8 @@ export function computeMatchScore(trades, walletsByAddress, marketPrices, market
   const rawTotal = ["home", "draw", "away"].reduce((sum, leg) => sum + (breakdown[leg].rawEstimate ?? 0), 0);
   for (const leg of ["home", "draw", "away"]) {
     const b = breakdown[leg];
-    b.probabilityEstimate = rawTotal > 0 && b.rawEstimate !== null ? b.rawEstimate / rawTotal : b.marketImpliedProbability;
-    b.edge = b.marketImpliedProbability === null ? null : b.probabilityEstimate - b.marketImpliedProbability;
+    b.probabilityEstimate = rawTotal > 0 && b.rawEstimate !== null ? b.rawEstimate / rawTotal : b.marketFairProbability;
+    b.edge = b.marketFairProbability === null ? null : b.probabilityEstimate - b.marketFairProbability;
     delete b.rawEstimate;
     if (b.edge !== null && Math.abs(b.edge) > bestAbsEdge) {
       bestAbsEdge = Math.abs(b.edge);
@@ -134,15 +153,21 @@ async function loadWatchlistedWallets(client) {
   return map;
 }
 
-// Normalizes every not-yet-resolved match with a determined market into
-// {id, homeTeam, awayTeam, kickoffTime, marketConditionIds, snapshots, trades}.
-// Snapshots come from Turso (one row per poll); trades come from R2.
-async function loadUpcomingMatches(client) {
+// Normalizes every match with a determined market into {id, homeTeam,
+// awayTeam, kickoffTime, marketConditionIds, snapshots, trades}. Snapshots
+// come from Turso (one row per poll); trades come from R2.
+//
+// Deliberately not filtered to resolved=0: resolved (backfilled) matches
+// need scoring too, so calibration/edge-segmentation/paper-bet history has
+// something to show against known outcomes. scoreMatch()'s own id-based
+// dedup means a resolved match that's already fully scored costs one cheap
+// existence check per run afterwards, not a re-score.
+async function loadMatchesToScore(client) {
   const { rows: matchRows } = await client.execute(
     `SELECT event_id AS "id", home_team AS "homeTeam", away_team AS "awayTeam", kickoff_time AS "kickoffTime",
             home_condition_id AS "home", draw_condition_id AS "draw", away_condition_id AS "away"
      FROM matches
-     WHERE resolved = 0 AND home_condition_id IS NOT NULL AND draw_condition_id IS NOT NULL AND away_condition_id IS NOT NULL`
+     WHERE home_condition_id IS NOT NULL AND draw_condition_id IS NOT NULL AND away_condition_id IS NOT NULL`
   );
   if (matchRows.length === 0) return [];
 
@@ -232,8 +257,8 @@ async function main() {
     return;
   }
 
-  console.log("Loading upcoming matches...");
-  const matches = await loadUpcomingMatches(client);
+  console.log("Loading matches to score...");
+  const matches = await loadMatchesToScore(client);
 
   let scored = 0;
   for (const match of matches) {
